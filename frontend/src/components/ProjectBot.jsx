@@ -50,7 +50,7 @@ export default function ProjectBot({ projectId, projectName, onClose }) {
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
 
-  const welcomeMsg = `Hi, I'm Moofasa — your DevFleet assistant for **${projectName}**. Tell me what to build and I'll draft a mission, or flip Planner mode for a full roadmap.`;
+  const welcomeMsg = `Hi, I'm Moofasa — your DevFleet assistant for ${projectName}. Tell me what to build and I'll draft a mission, or flip Planner mode for a full roadmap.`;
 
   useEffect(() => {
     getBotHistory(projectId)

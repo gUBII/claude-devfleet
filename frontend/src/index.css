@@ -2238,6 +2238,94 @@ body {
   to   { opacity: 1; transform: translateY(0); }
 }
 
+/* ── Moofasa floating widget (matches Nexis chat-bot pattern) ───────────── */
+@keyframes moofasa-floater-rise {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes moofasa-bubble-pop {
+  0%   { opacity: 0; transform: translateY(6px) scale(0.85); }
+  60%  { opacity: 1; transform: translateY(-2px) scale(1.04); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.moofasa-floater {
+  position: fixed;
+  right: 28px;
+  bottom: 24px;
+  z-index: 70;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  animation: moofasa-floater-rise 380ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: transform 220ms ease;
+}
+.moofasa-floater:hover { transform: translateY(-3px); }
+.moofasa-floater:hover .moofasa-floater__bubble {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.moofasa-floater__bubble {
+  display: inline-block;
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: var(--bg-surface);
+  color: var(--accent-text);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  margin-bottom: 18px;
+  box-shadow: var(--shadow-md);
+  opacity: 0;
+  transform: translateY(6px) scale(0.85);
+  white-space: nowrap;
+  pointer-events: none;
+  transition: background 200ms ease, color 200ms ease, border-color 200ms ease;
+  position: relative;
+}
+.moofasa-floater__bubble.is-visible {
+  animation: moofasa-bubble-pop 480ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+.moofasa-floater__bubble::after {
+  content: '';
+  position: absolute;
+  right: 14px;
+  bottom: -6px;
+  width: 10px;
+  height: 10px;
+  background: inherit;
+  border-right: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border-strong);
+  transform: rotate(45deg);
+  border-bottom-right-radius: 2px;
+}
+.moofasa-floater:hover .moofasa-floater__bubble::after {
+  border-color: var(--accent);
+}
+
+.moofasa-floater__mascot {
+  display: inline-flex;
+  align-items: flex-end;
+  justify-content: center;
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 35%, var(--accent-soft) 0%, transparent 70%);
+  filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.45));
+  transition: filter 220ms ease;
+}
+.moofasa-floater:hover .moofasa-floater__mascot {
+  filter: drop-shadow(0 10px 18px rgba(218, 119, 86, 0.35));
+}
+
 /* ── Moofasa avatar — subtle compositor-only animations ─────────────────── */
 @keyframes moofasa-float {
   0%, 100% { transform: translateY(0); }

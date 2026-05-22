@@ -3,7 +3,7 @@ import { getProject, listMissions } from '../api/client';
 import MissionCard from '../components/MissionCard';
 import StatusBadge from '../components/StatusBadge';
 import ProjectBot from '../components/ProjectBot';
-import Moofasa from '../components/Moofasa';
+import MoofasaFloater from '../components/MoofasaFloater';
 
 function timeAgo(dateStr) {
   if (!dateStr) return '';
@@ -71,15 +71,6 @@ export default function ProjectDetail({ id, navigate }) {
         <div className="flex justify-between items-center" style={{ marginBottom: 8 }}>
           <h2 style={{ fontSize: 24, fontWeight: 700, letterSpacing: '-0.02em' }}>{project.name}</h2>
           <div className="flex gap-8">
-            <button
-              className={`btn${showBot ? ' btn-primary' : ''}`}
-              onClick={() => setShowBot(v => !v)}
-              title="Toggle Moofasa — your project assistant"
-              style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
-            >
-              <Moofasa size={14} className="moofasa-hover" />
-              <span>Moofasa</span>
-            </button>
             <button className="btn btn-primary" onClick={() => navigate('missions')}>
               New Mission
             </button>
@@ -144,6 +135,14 @@ export default function ProjectDetail({ id, navigate }) {
           projectId={id}
           projectName={project.name}
           onClose={() => setShowBot(false)}
+        />
+      )}
+
+      {project && (
+        <MoofasaFloater
+          hidden={showBot}
+          projectName={project.name}
+          onOpen={() => setShowBot(true)}
         />
       )}
     </div>
