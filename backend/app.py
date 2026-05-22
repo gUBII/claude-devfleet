@@ -194,6 +194,10 @@ from mcp_external import server as mcp_server
 from starlette.routing import Route, Mount
 
 # ── SSE transport (legacy, backward-compatible) ──
+# DEPRECATED per MCP spec 2025-11-25. Removal scheduled 2026-07-01 (aligned
+# with Atlassian Rovo cutoff). All major clients (Claude Code, Cursor,
+# Continue, Cline) now speak Streamable HTTP natively.
+DEVFLEET_SSE_REMOVAL_DATE = "2026-07-01"
 _mcp_sse = SseServerTransport("/messages/")
 
 
@@ -203,6 +207,11 @@ _mcp_sse = SseServerTransport("/messages/")
 
 class _McpSseEndpoint:
     async def __call__(self, scope, receive, send):
+        log.warning(
+            "DEPRECATED MCP/SSE transport hit — removal scheduled %s. "
+            "Switch clients to Streamable HTTP at /mcp/.",
+            DEVFLEET_SSE_REMOVAL_DATE,
+        )
         try:
             async with _mcp_sse.connect_sse(scope, receive, send) as streams:
                 await mcp_server.run(
@@ -215,6 +224,10 @@ class _McpSseEndpoint:
 
 class _McpPostEndpoint:
     async def __call__(self, scope, receive, send):
+        log.warning(
+            "DEPRECATED MCP/SSE POST endpoint hit — removal scheduled %s.",
+            DEVFLEET_SSE_REMOVAL_DATE,
+        )
         try:
             await _mcp_sse.handle_post_message(scope, receive, send)
         except Exception:
