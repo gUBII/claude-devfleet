@@ -53,7 +53,7 @@ export default function FleetToast({ onFleetEvent }) {
       onEvent: (ev) => {
         if (!['mission_completed', 'mission_failed', 'mission_cancelled', 'mission_dispatched'].includes(ev.type)) return;
 
-        const id = `${ev.type}-${ev.session_id || Date.now()}`;
+        const id = `${ev.type}-${ev.session_id || ''}-${Date.now()}`;
         const toast = { ...ev, id };
         setToasts(prev => [...prev.slice(-4), toast]);
 

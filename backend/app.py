@@ -1062,6 +1062,12 @@ async def resume(mid: str, body: DispatchOptions | None = None):
         resume_mission(session_id, mission, claude_sid, opts=body)
     )
     running_tasks[session_id] = task
+    asyncio.create_task(fleet_bus.broadcast({
+        "type": "mission_dispatched",
+        "mission_id": mid,
+        "mission_title": mission.get("title", ""),
+        "session_id": session_id,
+    }))
 
     return {"session_id": session_id, "status": "running", "resumed": True}
 

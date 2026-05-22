@@ -19,6 +19,7 @@ import uuid
 from datetime import datetime, timezone
 
 import db
+import fleet_bus
 
 log = logging.getLogger("devfleet.mission_watcher")
 
@@ -118,6 +119,12 @@ async def _dispatch_eligible(mission: dict):
         await conn.close()
 
     await _emit_event(mission_id, "auto_dispatched", data={"session_id": session_id})
+    asyncio.create_task(fleet_bus.broadcast({
+        "type": "mission_dispatched",
+        "mission_id": mission_id,
+        "mission_title": mission.get("title", ""),
+        "session_id": session_id,
+    }))
 
     log.info("Auto-dispatching mission '%s' (session %s)", mission["title"], session_id)
 
