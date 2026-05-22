@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { getMission, updateMission, dispatchMission, deleteMission, generateNextMission, resumeMission, startMissionRemoteControl, stopRemoteControl, listSessions, getMissionEvents, setMissionSchedule, removeMissionSchedule, getSystemFeatures } from '../api/client';
 import StatusBadge from '../components/StatusBadge';
 import PromptEditor from '../components/PromptEditor';
@@ -39,11 +39,13 @@ export default function MissionDetail({ id, navigate }) {
   const [activeRemoteSession, setActiveRemoteSession] = useState(null);
   const [events, setEvents] = useState([]);
   const [remoteControlEnabled, setRemoteControlEnabled] = useState(true);
+  const terminalRef = useRef(false);
 
   const load = async () => {
     try {
       const m = await getMission(id);
       setMission(m);
+      terminalRef.current = ['completed', 'failed', 'interrupted'].includes(m.status);
       setPrompt(m.detailed_prompt);
       setCriteria(m.acceptance_criteria);
       setTitle(m.title);
@@ -66,10 +68,10 @@ export default function MissionDetail({ id, navigate }) {
   };
 
   useEffect(() => {
+    terminalRef.current = false;
     load();
-    // Poll while running so status transitions reflect without a page reload
     const interval = setInterval(() => {
-      if (mission && (mission.status === 'completed' || mission.status === 'failed' || mission.status === 'interrupted')) {
+      if (terminalRef.current) {
         clearInterval(interval);
         return;
       }
@@ -205,7 +207,7 @@ export default function MissionDetail({ id, navigate }) {
             <StatusBadge status={mission.status} />
             <span className="text-sm text-muted">{mission.project_name}</span>
             <span className="text-sm text-muted">{timeAgo(mission.updated_at)}</span>
-            {mission.model && mission.model !== 'claude-opus-4-6' && (
+            {mission.model && mission.model !== 'claude-opus-4-7' && (
               <span className="tag">{mission.model.replace('claude-', '').replace(/-\d+$/, '')}</span>
             )}
             {mission.mission_type && mission.mission_type !== 'implement' && (
@@ -265,7 +267,7 @@ export default function MissionDetail({ id, navigate }) {
               </button>
             </>
           )}
-          {mission.status === 'failed' && !editing && (
+          {(mission.status === 'failed' || mission.status === 'interrupted') && !editing && (
             <button className="btn btn-warning" onClick={handleResume} disabled={resuming}>
               {resuming ? 'Resuming...' : 'Resume'}
             </button>

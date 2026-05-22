@@ -25,15 +25,14 @@ export default function Reports({ navigate }) {
   const [expandedId, setExpandedId] = useState(null);
 
   useEffect(() => {
-    Promise.all([listReports(), listProjects()]).then(([r, p]) => {
-      setReports(r);
-      setProjects(p);
-    }).catch(() => {});
+    listProjects().then(setProjects).catch(() => {});
   }, []);
 
-  const filtered = filterProject
-    ? reports.filter(r => r.project_name === projects.find(p => p.id === filterProject)?.name)
-    : reports;
+  useEffect(() => {
+    listReports(filterProject ? { project_id: filterProject } : {}).then(setReports).catch(() => {});
+  }, [filterProject]);
+
+  const filtered = reports;
 
   return (
     <div>
