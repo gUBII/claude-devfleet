@@ -4,6 +4,10 @@ aiosqlite==0.20.0
 pydantic==2.10.3
 httpx==0.28.1
 claude-code-sdk>=0.0.25
+# MCP SDK is pulled in transitively by claude-code-sdk; pin explicitly so it
+# doesn't silently drift. v1.25+ requires pydantic 2.13 — upgrade together
+# in a focused sprint, not mid-feature.
+mcp==1.12.4
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
