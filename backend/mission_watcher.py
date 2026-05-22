@@ -24,8 +24,26 @@ import fleet_bus
 log = logging.getLogger("devfleet.mission_watcher")
 
 _watcher_task: asyncio.Task | None = None
-POLL_INTERVAL = int(os.environ.get("DEVFLEET_WATCHER_INTERVAL", "5"))
+# POLL_INTERVAL is now the FALLBACK heartbeat — the watcher mostly wakes via
+# the asyncio Event below, set when missions are created/updated. The fallback
+# tick still runs so stuck-session reaping happens even with no traffic.
+POLL_INTERVAL = int(os.environ.get("DEVFLEET_WATCHER_INTERVAL", "30"))
 MAX_CONCURRENT_AGENTS = int(os.environ.get("DEVFLEET_MAX_AGENTS", "3"))
+
+# Event-driven wake-up: replaces the 5s poll with sub-second response to
+# mission inserts. Callers nudge the watcher via wake() instead of waiting
+# for the next tick.
+_wake_event: asyncio.Event | None = None
+
+
+def wake() -> None:
+    """Nudge the mission watcher to run a cycle now.
+
+    Safe to call from any async or sync context. No-op if the watcher isn't
+    running yet. Multiple wakes between cycles coalesce into one cycle.
+    """
+    if _wake_event is not None:
+        _wake_event.set()
 
 
 async def _find_eligible_missions(lane_capacity: dict[str, int]) -> list[dict]:
@@ -217,8 +235,19 @@ async def _reap_stuck_sessions():
 
 
 async def _watch_loop():
-    """Main polling loop — find and dispatch eligible missions, reap stuck sessions."""
-    log.info("Mission watcher started (poll every %ds)", POLL_INTERVAL)
+    """Main loop — wakes on wake() OR on the POLL_INTERVAL heartbeat.
+
+    Heartbeat handles stuck-session reaping when there's no mission activity.
+    wake() handles fast dispatch when missions are created/updated.
+    """
+    log.info(
+        "Mission watcher started (event-driven; heartbeat fallback every %ds)",
+        POLL_INTERVAL,
+    )
+
+    global _wake_event
+    if _wake_event is None:
+        _wake_event = asyncio.Event()
 
     while True:
         try:
@@ -250,7 +279,13 @@ async def _watch_loop():
         except Exception as e:
             log.error("Mission watcher error: %s", e)
 
-        await asyncio.sleep(POLL_INTERVAL)
+        # Wait for wake() OR fall through after POLL_INTERVAL for heartbeat.
+        # Multiple wake()s between cycles coalesce — we clear() right after wait.
+        try:
+            await asyncio.wait_for(_wake_event.wait(), timeout=POLL_INTERVAL)
+        except asyncio.TimeoutError:
+            pass  # heartbeat tick
+        _wake_event.clear()
 
 
 async def start_watcher():

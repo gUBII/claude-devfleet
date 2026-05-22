@@ -939,6 +939,10 @@ async def create_mission(request: Request, body: MissionCreate):
             "SELECT m.*, p.name AS project_name FROM missions m JOIN projects p ON p.id=m.project_id WHERE m.id=?",
             (mid,),
         )
+        # Nudge the mission watcher so auto_dispatch missions go out sub-second
+        # instead of waiting for the next heartbeat. No-op if the mission isn't
+        # auto_dispatch — the watcher will see no eligible work on this wake.
+        mission_watcher.wake()
         return dict(row[0])
     finally:
         await conn.close()
