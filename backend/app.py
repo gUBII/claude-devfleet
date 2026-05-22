@@ -6,16 +6,18 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from pydantic import BaseModel
 
 import db
 from models import (ProjectCreate, ProjectUpdate, MissionCreate, MissionUpdate,
                     DispatchOptions, TOOL_PRESETS, MODEL_CHOICES,
                     ServiceCreate, ServiceUpdate, IncidentCreate, IncidentUpdate,
-                    McpServerCreate)
+                    McpServerCreate, CeilingUpdate)
 import health_checker
 import mission_watcher
 import scheduler
@@ -75,6 +77,31 @@ def reverse_path(path: str) -> str:
 @asynccontextmanager
 async def lifespan(app):
     await db.init_db()
+    # Sweep for sessions left running by a previous SIGKILL — mark interrupted so UI is accurate
+    # Sessions with claude_session_id can be resumed via POST /api/missions/{id}/resume
+    conn = await db.get_db()
+    try:
+        # Collect orphaned mission IDs BEFORE updating sessions (subquery must run first)
+        orphaned = await conn.execute_fetchall(
+            "SELECT DISTINCT mission_id FROM agent_sessions WHERE status='running'"
+        )
+        orphan_mission_ids = [r["mission_id"] for r in orphaned]
+        if orphan_mission_ids:
+            await conn.execute(
+                "UPDATE agent_sessions SET status='interrupted', ended_at=datetime('now'), "
+                "error_log='Process interrupted (restart/SIGKILL) — resume via POST /api/missions/{id}/resume' "
+                "WHERE status='running'"
+            )
+            placeholders = ",".join("?" * len(orphan_mission_ids))
+            await conn.execute(
+                f"UPDATE missions SET status='interrupted', updated_at=datetime('now') "
+                f"WHERE status='running' AND id IN ({placeholders})",
+                orphan_mission_ids,
+            )
+            await conn.commit()
+            log.warning("Startup sweep: marked %d orphaned session(s) as interrupted (resumable)", len(orphan_mission_ids))
+    finally:
+        await conn.close()
     await health_checker.start_checker()
     await mission_watcher.start_watcher()
     await scheduler.start_scheduler()
@@ -94,14 +121,63 @@ async def lifespan(app):
 
 app = FastAPI(title="Claude DevFleet API", lifespan=lifespan)
 
+_ALLOWED_ORIGINS = [
+    o.strip() for o in
+    os.environ.get("DEVFLEET_ALLOWED_ORIGINS",
+                   "http://localhost:3100,http://localhost:3101").split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
-MAX_CONCURRENT_AGENTS = int(os.environ.get("DEVFLEET_MAX_AGENTS", "3"))
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as _StarletteRequest
+
+# MCP API key — required for external /mcp and /messages access
+_MCP_API_KEY = os.environ.get("DEVFLEET_MCP_KEY", "")
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: _StarletteRequest, call_next):
+        request.state.user = None
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            try:
+                from auth import decode_token
+                request.state.user = decode_token(token)
+            except Exception:
+                pass  # Invalid/expired token → user stays None; endpoint decides if it cares
+        return await call_next(request)
+
+
+app.add_middleware(AuthMiddleware)
+
+# ── Rate limiting (C3 fix) ───────────────────────────────────────────────────
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+_limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = _limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+MAX_CONCURRENT_AGENTS = int(os.environ.get("DEVFLEET_MAX_AGENTS", "0"))  # 0 = defer to lane system
 
 
 # ──────────────────────────────────────────────
@@ -216,6 +292,138 @@ app.mount("/mcp", Mount(path="", routes=[
 
 
 # ──────────────────────────────────────────────
+# Auth Routes
+# ──────────────────────────────────────────────
+from models import UserCreate, UserLogin
+
+@app.post("/api/auth/login")
+@_limiter.limit("5/minute")
+async def auth_login(request: Request, body: UserLogin):
+    from auth import get_user_by_email, verify_password, create_access_token
+    user = await get_user_by_email(body.email)
+    # Always run bcrypt verify (against a dummy hash when user is None) so login
+    # timing does not leak whether the email is registered.
+    password_ok = verify_password(body.password, user["password_hash"] if user else None)
+    if not user or not password_ok:
+        raise HTTPException(401, "Invalid email or password")
+    conn = await db.get_db()
+    try:
+        await conn.execute("UPDATE users SET last_login_at=datetime('now') WHERE id=?", (user["id"],))
+        await conn.commit()
+    finally:
+        await conn.close()
+    token = create_access_token(user["id"], user["email"], user["role"])
+    return {"access_token": token, "token_type": "bearer",
+            "user": {"id": user["id"], "email": user["email"], "role": user["role"]}}
+
+
+@app.post("/api/auth/register")
+@_limiter.limit("5/minute")
+async def auth_register(request: Request, body: UserCreate):
+    from auth import get_user_by_email, create_user, consume_invite_token, create_access_token
+    # Generic 400 for any registration failure (existing email, invalid token,
+    # bad password) so we don't leak which inputs are valid.
+    if await get_user_by_email(body.email):
+        log.info("Registration rejected: email already in use (%s)", body.email)
+        raise HTTPException(400, "Registration failed — check your invite token and try again")
+    try:
+        user = await create_user(body.email, body.password)
+    except ValueError:
+        log.exception("Registration rejected: invalid password")
+        raise HTTPException(400, "Registration failed — check your invite token and try again")
+    valid = await consume_invite_token(body.invite_token, user["id"])
+    if not valid:
+        conn = await db.get_db()
+        try:
+            await conn.execute("DELETE FROM users WHERE id=?", (user["id"],))
+            await conn.commit()
+        finally:
+            await conn.close()
+        raise HTTPException(400, "Registration failed — check your invite token and try again")
+    token = create_access_token(user["id"], user["email"], user["role"])
+    return {"access_token": token, "token_type": "bearer",
+            "user": {"id": user["id"], "email": user["email"], "role": user["role"]}}
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Not authenticated")
+    return {"id": user["sub"], "email": user["email"], "role": user["role"]}
+
+
+@app.post("/api/auth/invite")
+async def auth_invite(request: Request):
+    user = getattr(request.state, "user", None)
+    if not user or user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    from auth import create_invite_token
+    token = await create_invite_token(user["sub"])
+    return {"invite_token": token, "expires_in": "7 days"}
+
+
+@app.get("/api/auth/users")
+async def auth_list_users(request: Request):
+    user = getattr(request.state, "user", None)
+    if not user or user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT id, email, role, created_at, last_login_at FROM users ORDER BY created_at"
+        )
+        return [dict(r) for r in rows]
+    finally:
+        await conn.close()
+
+
+# ──────────────────────────────────────────────
+# Fleet Events SSE
+# ──────────────────────────────────────────────
+_fleet_subscribers: list[asyncio.Queue] = []
+
+
+async def broadcast_fleet_event(event: dict):
+    dead = []
+    for q in _fleet_subscribers:
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            dead.append(q)
+    for q in dead:
+        if q in _fleet_subscribers:
+            _fleet_subscribers.remove(q)
+
+
+@app.get("/api/events")
+async def fleet_events_stream(request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    q: asyncio.Queue = asyncio.Queue(maxsize=100)
+    _fleet_subscribers.append(q)
+
+    async def event_stream():
+        try:
+            yield f"data: {json.dumps({'type': 'connected', 'user': user['email']})}\n\n"
+            while True:
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=30)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+        finally:
+            if q in _fleet_subscribers:
+                _fleet_subscribers.remove(q)
+
+    return StreamingResponse(
+        event_stream(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ──────────────────────────────────────────────
 # Projects
 # ──────────────────────────────────────────────
 
@@ -298,7 +506,7 @@ async def update_project(pid: str, body: ProjectUpdate):
         await conn.close()
 
 
-@app.delete("/api/projects/{pid}")
+@app.delete("/api/projects/{pid}", status_code=204)
 async def delete_project(pid: str):
     conn = await db.get_db()
     try:
@@ -307,7 +515,6 @@ async def delete_project(pid: str):
             raise HTTPException(404, "Project not found")
         await conn.execute("DELETE FROM projects WHERE id=?", (pid,))
         await conn.commit()
-        return {"ok": True}
     finally:
         await conn.close()
 
@@ -318,10 +525,13 @@ async def delete_project(pid: str):
 
 @app.get("/api/missions")
 async def list_missions(
+    response: Response,
     project_id: str = Query(None),
     status: str = Query(None),
     tag: str = Query(None),
     parent_mission_id: str = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
 ):
     conn = await db.get_db()
     try:
@@ -341,6 +551,8 @@ async def list_missions(
             params.append(parent_mission_id)
         query += " ORDER BY m.priority DESC, m.created_at DESC"
         rows = await conn.execute_fetchall(query, params)
+        # Tag filter is applied in Python because tags are stored as JSON text;
+        # LIMIT/OFFSET therefore slice the filtered list rather than the raw SQL result.
         results = []
         for r in rows:
             d = dict(r)
@@ -349,18 +561,19 @@ async def list_missions(
                 if tag not in tags:
                     continue
             results.append(d)
-        return results
+        response.headers["X-Total-Count"] = str(len(results))
+        return results[offset:offset + limit]
     finally:
         await conn.close()
 
 
 @app.post("/api/missions", status_code=201)
-async def create_mission(body: MissionCreate):
+async def create_mission(request: Request, body: MissionCreate):
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall("SELECT id FROM projects WHERE id=?", (body.project_id,))
         if not rows:
-            raise HTTPException(400, "Project not found")
+            raise HTTPException(404, "Project not found")
         mid = str(uuid.uuid4())
         schedule_enabled = 1 if body.schedule_cron else 0
         # Get next mission number for this project
@@ -369,17 +582,26 @@ async def create_mission(body: MissionCreate):
             (body.project_id,),
         )
         next_num = num_rows[0][0] if num_rows else 1
+        # Derive lane from mission_type if not explicitly provided
+        from models import MISSION_TYPE_TO_LANE
+        lane = body.lane or MISSION_TYPE_TO_LANE.get(body.mission_type, "coder")
+        # Capture authenticated user for attribution
+        _user = getattr(request.state, "user", None)
+        _by_email = _user.get("email", "") if _user else ""
+        _by_name = _by_email.split("@")[0] if _by_email else ""
         await conn.execute(
             """INSERT INTO missions (id, project_id, title, detailed_prompt, acceptance_criteria,
                priority, tags, model, max_turns, max_budget_usd, allowed_tools, mission_type,
-               parent_mission_id, depends_on, auto_dispatch, schedule_cron, schedule_enabled, mission_number)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               lane, parent_mission_id, depends_on, auto_dispatch, schedule_cron, schedule_enabled,
+               mission_number, created_by_email, created_by_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (mid, body.project_id, body.title, body.detailed_prompt,
              body.acceptance_criteria, body.priority, json.dumps(body.tags),
              body.model, body.max_turns, body.max_budget_usd,
-             body.allowed_tools or "", body.mission_type,
+             body.allowed_tools or "", body.mission_type, lane,
              body.parent_mission_id, json.dumps(body.depends_on),
-             1 if body.auto_dispatch else 0, body.schedule_cron, schedule_enabled, next_num),
+             1 if body.auto_dispatch else 0, body.schedule_cron, schedule_enabled,
+             next_num, _by_email, _by_name),
         )
         await conn.commit()
         row = await conn.execute_fetchall(
@@ -477,7 +699,7 @@ async def update_mission(mid: str, body: MissionUpdate):
         await conn.close()
 
 
-@app.delete("/api/missions/{mid}")
+@app.delete("/api/missions/{mid}", status_code=204)
 async def delete_mission(mid: str):
     conn = await db.get_db()
     try:
@@ -488,7 +710,6 @@ async def delete_mission(mid: str):
             raise HTTPException(400, "Cannot delete a running mission — cancel it first")
         await conn.execute("DELETE FROM missions WHERE id=?", (mid,))
         await conn.commit()
-        return {"ok": True}
     finally:
         await conn.close()
 
@@ -588,14 +809,160 @@ async def generate_next_mission(mid: str):
 
 
 # ──────────────────────────────────────────────
+# Lanes
+# ──────────────────────────────────────────────
+
+@app.get("/api/lanes")
+async def get_lanes():
+    """Return live lane topology — all lanes with running/free slot counts."""
+    from lanes import snapshot as lane_snapshot
+    return await lane_snapshot()
+
+
+@app.get("/api/lanes/studio-summary")
+async def lanes_studio_summary():
+    """Fleet-wide Prompt Studio stats for the Dashboard card."""
+    conn = await db.get_db()
+    try:
+        total = (await (await conn.execute(
+            "SELECT COUNT(*) FROM lanes WHERE enabled=1"
+        )).fetchone())[0]
+        customized = (await (await conn.execute(
+            "SELECT COUNT(*) FROM lanes WHERE json_valid(append_prompt) AND enabled=1"
+        )).fetchone())[0]
+        disabled_tools = (await (await conn.execute(
+            "SELECT COUNT(*) FROM lane_mcp_tools WHERE enabled=0"
+        )).fetchone())[0]
+        critiques = (await (await conn.execute(
+            "SELECT COUNT(*) FROM lane_prompt_critiques"
+        )).fetchone())[0]
+    finally:
+        await conn.close()
+    return {
+        "total_lanes": total,
+        "customized_count": customized,
+        "disabled_tools_count": disabled_tools,
+        "critiques_available": critiques,
+    }
+
+
+@app.post("/api/lanes/run-critique")
+async def run_lane_critique_batch():
+    """Trigger one-time Opus 4.7 critique for all lanes. Returns immediately; runs in background."""
+    import asyncio as _asyncio
+    from lane_critique import run_critique_batch
+    _asyncio.create_task(run_critique_batch())
+    return {"status": "started", "message": "Opus critique batch running in background (~30s)"}
+
+
+@app.get("/api/lanes/{name}")
+async def get_lane(name: str):
+    from lanes import get_one_lane
+    lane = await get_one_lane(name)
+    if not lane:
+        raise HTTPException(404, f"Lane '{name}' not found")
+    return lane
+
+
+@app.put("/api/lanes/{name}")
+async def update_lane_endpoint(name: str, body: dict):
+    from lanes import update_lane, get_one_lane
+    existing = await get_one_lane(name)
+    if not existing:
+        raise HTTPException(404, f"Lane '{name}' not found")
+    allowed = {"max_agents", "default_model", "tool_preset", "append_prompt", "color", "icon", "enabled"}
+    patch = {k: v for k, v in body.items() if k in allowed}
+    updated = await update_lane(name, patch)
+    return updated
+
+
+@app.get("/api/lanes/{name}/prompt")
+async def get_lane_prompt(name: str):
+    from lanes import get_one_lane, parse_prompt_json
+    lane = await get_one_lane(name)
+    if not lane:
+        raise HTTPException(404, f"Lane '{name}' not found")
+    return parse_prompt_json(lane.get("append_prompt", ""))
+
+
+@app.put("/api/lanes/{name}/prompt")
+async def update_lane_prompt(name: str, body: dict):
+    from lanes import get_one_lane, update_lane
+    if not await get_one_lane(name):
+        raise HTTPException(404, f"Lane '{name}' not found")
+    allowed_keys = {"role", "rules", "quality_gates", "context_hints"}
+    prompt_json = {k: v for k, v in body.items() if k in allowed_keys}
+    await update_lane(name, {"append_prompt": json.dumps(prompt_json)})
+    return prompt_json
+
+
+@app.get("/api/lanes/{name}/mcp-tools")
+async def get_lane_mcp_tools_endpoint(name: str):
+    from lanes import get_lane_mcp_tools
+    return await get_lane_mcp_tools(name)
+
+
+@app.put("/api/lanes/{name}/mcp-tools/{server}/{tool}")
+async def update_lane_mcp_tool(name: str, server: str, tool: str, body: dict):
+    from lanes import upsert_lane_mcp_tool
+    enabled = body.get("enabled", True)
+    trigger_hint = body.get("trigger_hint", "always")
+    return await upsert_lane_mcp_tool(name, server, tool, bool(enabled), trigger_hint)
+
+
+@app.get("/api/lanes/{name}/prompt-critique")
+async def get_lane_critique(name: str):
+    conn = await db.get_db()
+    try:
+        row = await (await conn.execute(
+            "SELECT * FROM lane_prompt_critiques WHERE lane_name = ?", (name,)
+        )).fetchone()
+    finally:
+        await conn.close()
+    if not row:
+        return {"lane_name": name, "critique_json": None, "created_at": None}
+    row_dict = dict(row)
+    try:
+        row_dict["critique_json"] = json.loads(row_dict["critique_json"])
+    except Exception:
+        pass
+    return row_dict
+
+
+@app.get("/api/fleet/summary")
+async def fleet_summary():
+    """Fleet health snapshot — total slots, running agents, free slots, and today's cost."""
+    from lanes import total_capacity as lane_total_capacity
+    total_slots = lane_total_capacity()
+    running_agents = sum(1 for t in running_tasks.values() if not t.done())
+    free_slots = max(0, total_slots - running_agents)
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            """SELECT COALESCE(SUM(total_cost_usd), 0) AS cost_today
+               FROM agent_sessions
+               WHERE DATE(started_at) = DATE('now')"""
+        )
+        cost_today_usd = dict(rows[0])["cost_today"] if rows else 0.0
+    finally:
+        await conn.close()
+    return {
+        "total_slots": total_slots,
+        "running_agents": running_agents,
+        "free_slots": free_slots,
+        "cost_today_usd": round(cost_today_usd, 6),
+    }
+
+
+# ──────────────────────────────────────────────
 # Dispatch
 # ──────────────────────────────────────────────
 
 @app.post("/api/missions/{mid}/dispatch")
-async def dispatch(mid: str, body: DispatchOptions | None = None):
+async def dispatch(request: Request, mid: str, body: DispatchOptions | None = None):
     running_count = sum(1 for t in running_tasks.values() if not t.done())
-    if running_count >= MAX_CONCURRENT_AGENTS:
-        raise HTTPException(429, f"Max {MAX_CONCURRENT_AGENTS} concurrent agents — wait for one to finish")
+    if MAX_CONCURRENT_AGENTS > 0 and running_count >= MAX_CONCURRENT_AGENTS:
+        raise HTTPException(429, f"Global agent ceiling reached ({running_count}/{MAX_CONCURRENT_AGENTS}) — wait for a slot")
 
     conn = await db.get_db()
     try:
@@ -609,6 +976,12 @@ async def dispatch(mid: str, body: DispatchOptions | None = None):
         if mission["status"] == "running":
             raise HTTPException(400, "Mission already running")
 
+        # Per-lane capacity check
+        from lanes import check_slot
+        ok, reason = await check_slot(mission)
+        if not ok:
+            raise HTTPException(429, f"Lane full: {reason}")
+
         # Get last report for context
         reports = await conn.execute_fetchall(
             "SELECT * FROM reports WHERE mission_id=? ORDER BY created_at DESC LIMIT 1",
@@ -617,7 +990,7 @@ async def dispatch(mid: str, body: DispatchOptions | None = None):
         last_report = dict(reports[0]) if reports else None
 
         session_id = str(uuid.uuid4())
-        model_used = (body and body.model) or mission.get("model") or "claude-opus-4-6"
+        model_used = (body and body.model) or mission.get("model") or "claude-opus-4-7"
         await conn.execute(
             "INSERT INTO agent_sessions (id, mission_id, model) VALUES (?, ?, ?)",
             (session_id, mid, model_used),
@@ -630,8 +1003,18 @@ async def dispatch(mid: str, body: DispatchOptions | None = None):
     finally:
         await conn.close()
 
+    # Look up calling user's GitHub token (if they have one stored)
+    _dispatch_user = getattr(request.state, "user", None)
+    _github_token = None
+    if _dispatch_user:
+        _gh_rows = await (await (await db.get_db()).execute(
+            "SELECT github_token FROM users WHERE id=?", (_dispatch_user.get("sub"),)
+        )).fetchone()
+        if _gh_rows and _gh_rows[0]:
+            _github_token = _gh_rows[0]
+
     task = asyncio.create_task(
-        dispatch_mission(session_id, mission, last_report, opts=body)
+        dispatch_mission(session_id, mission, last_report, opts=body, github_token=_github_token)
     )
     running_tasks[session_id] = task
 
@@ -642,8 +1025,8 @@ async def dispatch(mid: str, body: DispatchOptions | None = None):
 async def resume(mid: str, body: DispatchOptions | None = None):
     """Resume a failed mission from its last Claude session."""
     running_count = sum(1 for t in running_tasks.values() if not t.done())
-    if running_count >= MAX_CONCURRENT_AGENTS:
-        raise HTTPException(429, f"Max {MAX_CONCURRENT_AGENTS} concurrent agents — wait for one to finish")
+    if MAX_CONCURRENT_AGENTS > 0 and running_count >= MAX_CONCURRENT_AGENTS:
+        raise HTTPException(429, f"Global agent ceiling reached ({running_count}/{MAX_CONCURRENT_AGENTS}) — wait for a slot")
 
     conn = await db.get_db()
     try:
@@ -696,23 +1079,42 @@ async def resume(mid: str, body: DispatchOptions | None = None):
 # ──────────────────────────────────────────────
 
 @app.get("/api/sessions")
-async def list_sessions(mission_id: str = Query(None), status: str = Query(None)):
+async def list_sessions(
+    response: Response,
+    mission_id: str = Query(None),
+    status: str = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
     conn = await db.get_db()
     try:
-        query = """SELECT s.*, m.title AS mission_title, p.name AS project_name
-                   FROM agent_sessions s
-                   JOIN missions m ON m.id = s.mission_id
-                   JOIN projects p ON p.id = m.project_id
-                   WHERE 1=1"""
+        base_where = "WHERE 1=1"
         params = []
         if mission_id:
-            query += " AND s.mission_id=?"
+            base_where += " AND s.mission_id=?"
             params.append(mission_id)
         if status:
-            query += " AND s.status=?"
+            base_where += " AND s.status=?"
             params.append(status)
-        query += " ORDER BY s.started_at DESC"
-        rows = await conn.execute_fetchall(query, params)
+        # Total count uses the same JOINs as the data query so orphan rows
+        # (sessions whose mission/project was deleted) aren't counted as matches.
+        count_rows = await conn.execute_fetchall(
+            f"""SELECT COUNT(*) AS n FROM agent_sessions s
+                JOIN missions m ON m.id = s.mission_id
+                JOIN projects p ON p.id = m.project_id
+                {base_where}""",
+            params,
+        )
+        total = count_rows[0]["n"] if count_rows else 0
+        query = f"""SELECT s.*, m.title AS mission_title, p.name AS project_name
+                    FROM agent_sessions s
+                    JOIN missions m ON m.id = s.mission_id
+                    JOIN projects p ON p.id = m.project_id
+                    {base_where}
+                    ORDER BY s.started_at DESC
+                    LIMIT ? OFFSET ?"""
+        rows = await conn.execute_fetchall(query, params + [limit, offset])
+        response.headers["X-Total-Count"] = str(total)
         return [dict(r) for r in rows]
     finally:
         await conn.close()
@@ -768,23 +1170,39 @@ async def cancel(sid: str):
 # ──────────────────────────────────────────────
 
 @app.get("/api/reports")
-async def list_reports(project_id: str = Query(None), mission_id: str = Query(None)):
+async def list_reports(
+    response: Response,
+    project_id: str = Query(None),
+    mission_id: str = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
     conn = await db.get_db()
     try:
-        query = """SELECT r.*, m.title AS mission_title, p.name AS project_name
-                   FROM reports r
-                   JOIN missions m ON m.id = r.mission_id
-                   JOIN projects p ON p.id = m.project_id
-                   WHERE 1=1"""
+        base_where = "WHERE 1=1"
         params = []
         if mission_id:
-            query += " AND r.mission_id=?"
+            base_where += " AND r.mission_id=?"
             params.append(mission_id)
         if project_id:
-            query += " AND m.project_id=?"
+            base_where += " AND m.project_id=?"
             params.append(project_id)
-        query += " ORDER BY r.created_at DESC"
-        rows = await conn.execute_fetchall(query, params)
+        count_rows = await conn.execute_fetchall(
+            f"""SELECT COUNT(*) AS n FROM reports r
+                JOIN missions m ON m.id = r.mission_id
+                {base_where}""",
+            params,
+        )
+        total = count_rows[0]["n"] if count_rows else 0
+        query = f"""SELECT r.*, m.title AS mission_title, p.name AS project_name
+                    FROM reports r
+                    JOIN missions m ON m.id = r.mission_id
+                    JOIN projects p ON p.id = m.project_id
+                    {base_where}
+                    ORDER BY r.created_at DESC
+                    LIMIT ? OFFSET ?"""
+        rows = await conn.execute_fetchall(query, params + [limit, offset])
+        response.headers["X-Total-Count"] = str(total)
         return [dict(r) for r in rows]
     finally:
         await conn.close()
@@ -821,7 +1239,14 @@ async def dashboard_stats():
         missions_by_status = await conn.execute_fetchall(
             "SELECT status, COUNT(*) AS c FROM missions GROUP BY status"
         )
-        running_agents = sum(1 for t in running_tasks.values() if not t.done())
+        # Use DB as source of truth — in-memory running_tasks loses sessions on restart
+        db_running = await conn.execute_fetchall(
+            "SELECT COUNT(*) AS c FROM agent_sessions WHERE status = 'running'"
+        )
+        running_agents = max(
+            sum(1 for t in running_tasks.values() if not t.done()),
+            dict(db_running[0])["c"] if db_running else 0
+        )
         recent_reports = await conn.execute_fetchall(
             """SELECT r.id, r.created_at, r.what_done, r.what_open,
                       m.title AS mission_title, p.name AS project_name
@@ -949,7 +1374,7 @@ async def api_plan_project(body: PlanRequest):
         raise HTTPException(422, str(e))
     except Exception as e:
         log.exception("Plan failed")
-        raise HTTPException(500, f"Planning failed: {e}")
+        raise HTTPException(500, "Planning failed")
 
 
 # ──────────────────────────────────────────────
@@ -999,7 +1424,7 @@ async def api_plan_intelligent(body: PlanIntelligentRequest):
         raise HTTPException(422, str(e))
     except Exception as e:
         log.exception("Intelligent planning failed")
-        raise HTTPException(500, f"Planning failed: {e}")
+        raise HTTPException(500, "Planning failed")
 
 
 class AnalyzeProjectRequest(BaseModel):
@@ -1032,7 +1457,7 @@ async def api_analyze_project(pid: str, body: AnalyzeProjectRequest):
         }
     except Exception as e:
         log.exception("Project analysis failed")
-        raise HTTPException(500, f"Analysis failed: {e}")
+        raise HTTPException(500, "Analysis failed")
 
 
 @app.get("/api/projects/{pid}/health")
@@ -1051,7 +1476,7 @@ async def api_project_health(pid: str):
         return health
     except Exception as e:
         log.exception("Health check failed")
-        raise HTTPException(500, f"Health check failed: {e}")
+        raise HTTPException(500, "Health check failed")
 
 
 @app.get("/api/projects/{pid}/missions/graph")
@@ -1077,7 +1502,7 @@ async def api_mission_graph(
         }
     except Exception as e:
         log.exception("Mission graph generation failed")
-        raise HTTPException(500, f"Graph generation failed: {e}")
+        raise HTTPException(500, "Graph generation failed")
 
 
 @app.get("/api/projects/{pid}/missions/summary-diagram")
@@ -1099,7 +1524,7 @@ async def api_project_summary(pid: str):
         }
     except Exception as e:
         log.exception("Summary diagram generation failed")
-        raise HTTPException(500, f"Diagram generation failed: {e}")
+        raise HTTPException(500, "Diagram generation failed")
 
 
 @app.get("/api/projects/{pid}/costs")
@@ -1118,7 +1543,7 @@ async def api_cost_analysis(pid: str):
         return analysis
     except Exception as e:
         log.exception("Cost analysis failed")
-        raise HTTPException(500, f"Cost analysis failed: {e}")
+        raise HTTPException(500, "Cost analysis failed")
 
 
 # ──────────────────────────────────────────────
@@ -1332,7 +1757,7 @@ async def start_remote_for_mission(mid: str):
     return {"url": url, "session_id": session_id}
 
 
-@app.delete("/api/sessions/{sid}/remote-control")
+@app.delete("/api/sessions/{sid}/remote-control", status_code=204)
 async def stop_remote(sid: str):
     """Stop a remote-control session and reset mission status."""
     if not ENABLE_REMOTE_CONTROL:
@@ -1373,8 +1798,6 @@ async def stop_remote(sid: str):
         await conn.commit()
     finally:
         await conn.close()
-
-    return {"ok": True}
 
 
 @app.get("/api/sessions/{sid}/remote-control")
@@ -1433,7 +1856,7 @@ async def create_service(body: ServiceCreate):
     try:
         rows = await conn.execute_fetchall("SELECT id FROM projects WHERE id=?", (body.project_id,))
         if not rows:
-            raise HTTPException(400, "Project not found")
+            raise HTTPException(404, "Project not found")
         sid = str(uuid.uuid4())
         await conn.execute(
             """INSERT INTO monitored_services (id, project_id, name, url, group_name, description,
@@ -1487,7 +1910,7 @@ async def update_service(sid: str, body: ServiceUpdate):
         await conn.close()
 
 
-@app.delete("/api/services/{sid}")
+@app.delete("/api/services/{sid}", status_code=204)
 async def delete_service(sid: str):
     conn = await db.get_db()
     try:
@@ -1496,7 +1919,6 @@ async def delete_service(sid: str):
             raise HTTPException(404, "Service not found")
         await conn.execute("DELETE FROM monitored_services WHERE id=?", (sid,))
         await conn.commit()
-        return {"ok": True}
     finally:
         await conn.close()
 
@@ -1701,7 +2123,7 @@ async def update_incident(iid: str, body: IncidentUpdate):
         await conn.close()
 
 
-@app.delete("/api/incidents/{iid}")
+@app.delete("/api/incidents/{iid}", status_code=204)
 async def delete_incident(iid: str):
     conn = await db.get_db()
     try:
@@ -1710,7 +2132,6 @@ async def delete_incident(iid: str):
             raise HTTPException(404, "Incident not found")
         await conn.execute("DELETE FROM incidents WHERE id=?", (iid,))
         await conn.commit()
-        return {"ok": True}
     finally:
         await conn.close()
 
@@ -1790,7 +2211,7 @@ async def add_mcp_server(pid: str, body: McpServerCreate):
         await conn.close()
 
 
-@app.delete("/api/mcp-servers/{mid}")
+@app.delete("/api/mcp-servers/{mid}", status_code=204)
 async def delete_mcp_server(mid: str):
     conn = await db.get_db()
     try:
@@ -1799,7 +2220,6 @@ async def delete_mcp_server(mid: str):
             raise HTTPException(404, "MCP server config not found")
         await conn.execute("DELETE FROM mcp_configs WHERE id=?", (mid,))
         await conn.commit()
-        return {"ok": True}
     finally:
         await conn.close()
 
@@ -1831,7 +2251,7 @@ async def set_schedule(mid: str, body: ScheduleRequest):
         await conn.close()
 
 
-@app.delete("/api/missions/{mid}/schedule")
+@app.delete("/api/missions/{mid}/schedule", status_code=204)
 async def remove_schedule(mid: str):
     """Disable scheduling on a mission."""
     conn = await db.get_db()
@@ -1841,7 +2261,6 @@ async def remove_schedule(mid: str):
             (datetime.now(timezone.utc).isoformat(), mid),
         )
         await conn.commit()
-        return {"ok": True}
     finally:
         await conn.close()
 
@@ -1883,17 +2302,133 @@ async def list_mission_events(mid: str, limit: int = Query(20)):
         await conn.close()
 
 
+_tunnel_status_cache: dict = {"value": None, "expires_at": 0.0}
+_TUNNEL_STATUS_TTL_SEC = 15.0
+
+
+def _tunnel_status() -> dict:
+    """Check cloudflared tunnel health. Prefers the local /ready endpoint
+    (sub-millisecond, Sydney-local) over `cloudflared tunnel info` (which
+    round-trips to Cloudflare's US control plane — adds ~640ms per call).
+
+    Result is cached for _TUNNEL_STATUS_TTL_SEC so the dashboard's 5s poll
+    doesn't pay the cost on every tick even if the local endpoint is down.
+    """
+    import time as _time
+    now = _time.monotonic()
+    cached = _tunnel_status_cache["value"]
+    if cached is not None and now < _tunnel_status_cache["expires_at"]:
+        return cached
+
+    result = _tunnel_status_uncached()
+    _tunnel_status_cache["value"] = result
+    _tunnel_status_cache["expires_at"] = now + _TUNNEL_STATUS_TTL_SEC
+    return result
+
+
+def _tunnel_status_uncached() -> dict:
+    # Fast path — local cloudflared metrics endpoint (auto-discovered via lsof)
+    import subprocess, json as _json
+    fallback = {"connected": False, "url": None, "connections": 0}
+    try:
+        port = _discover_cloudflared_metrics_port()
+        if port:
+            import urllib.request, urllib.error
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/ready", timeout=1) as r:
+                data = _json.loads(r.read())
+            conns = int(data.get("readyConnections", 0))
+            return {
+                "connected": conns > 0,
+                "url": "https://farhanfleet.nexis365.com.au" if conns > 0 else None,
+                "connections": conns,
+            }
+    except Exception:
+        pass
+
+    # Slow fallback — only used when the local metrics endpoint is unreachable
+    try:
+        proc = subprocess.run(
+            ["cloudflared", "tunnel", "info", "--output", "json", "farhanfleet"],
+            capture_output=True, text=True, timeout=4,
+        )
+        if proc.returncode == 0:
+            data = _json.loads(proc.stdout)
+            conns = data.get("conns") or []
+            connected = len(conns) > 0
+            return {
+                "connected": connected,
+                "url": "https://farhanfleet.nexis365.com.au" if connected else None,
+                "connections": len(conns),
+            }
+    except Exception:
+        pass
+    return fallback
+
+
+_cloudflared_port_cache: dict = {"port": None, "checked_at": 0.0}
+_PORT_DISCOVERY_TTL_SEC = 60.0
+
+
+def _discover_cloudflared_metrics_port() -> int | None:
+    """Find the metrics port cloudflared is listening on. Cached for 60s
+    because the port doesn't change unless cloudflared restarts."""
+    import time as _time, subprocess
+    now = _time.monotonic()
+    if _cloudflared_port_cache["port"] is not None and \
+            now - _cloudflared_port_cache["checked_at"] < _PORT_DISCOVERY_TTL_SEC:
+        return _cloudflared_port_cache["port"]
+
+    try:
+        # `lsof -an -iTCP -sTCP:LISTEN -c cloudflared` lists listening sockets;
+        # parse the first 127.0.0.1:<port>. Use absolute path because launchd's
+        # PATH doesn't include /usr/sbin where macOS keeps lsof.
+        lsof_bin = "/usr/sbin/lsof" if os.path.exists("/usr/sbin/lsof") else "lsof"
+        out = subprocess.run(
+            [lsof_bin, "-an", "-iTCP", "-sTCP:LISTEN", "-c", "cloudflared", "-Fn"],
+            capture_output=True, text=True, timeout=2,
+        )
+        port: int | None = None
+        for line in out.stdout.splitlines():
+            if line.startswith("n127.0.0.1:"):
+                port = int(line.split(":", 1)[1])
+                break
+        _cloudflared_port_cache["port"] = port
+        _cloudflared_port_cache["checked_at"] = now
+        return port
+    except Exception:
+        return None
+
+
 @app.get("/api/system/status")
 async def system_status():
-    """Get system-wide status: watcher, scheduler, running agents."""
+    """Get system-wide status: watcher, scheduler, running agents, tunnel."""
+    from lanes import total_capacity as lane_total_capacity
     running_count = sum(1 for t in running_tasks.values() if not t.done())
+    total_slots = lane_total_capacity()
     return {
         "running_agents": running_count,
         "max_agents": MAX_CONCURRENT_AGENTS,
+        "total_slots": total_slots,
+        "free_slots": max(0, total_slots - running_count),
         "engine": "sdk" if USE_SDK_ENGINE else "cli",
         "mission_watcher": mission_watcher.get_watcher_status(),
         "scheduler": scheduler.get_scheduler_status(),
+        "tunnel": _tunnel_status(),
     }
+
+
+@app.patch("/api/system/ceiling")
+async def set_ceiling(request: Request, body: CeilingUpdate):
+    """Set the global agent ceiling at runtime. Admin only."""
+    _u = getattr(request.state, "user", None)
+    if not _u or _u.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    if body.max_agents < 0:
+        raise HTTPException(400, "max_agents must be a non-negative integer")
+    global MAX_CONCURRENT_AGENTS
+    MAX_CONCURRENT_AGENTS = body.max_agents
+    running_count = sum(1 for t in running_tasks.values() if not t.done())
+    return {"max_agents": MAX_CONCURRENT_AGENTS, "running_agents": running_count}
 
 
 @app.get("/api/system/features")
@@ -1902,3 +2437,28 @@ async def system_features():
     return {
         "remote_control": ENABLE_REMOTE_CONTROL,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Frontend SPA serving — must be registered LAST so /api/* routes take precedence
+# ──────────────────────────────────────────────────────────────────────────────
+_FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+
+if _FRONTEND_DIST.is_dir():
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def spa_fallback(full_path: str):
+        """Serve index.html for all non-API client-side routes (React Router fallback)."""
+        if full_path.startswith("api/") or full_path.startswith("mcp"):
+            raise HTTPException(404, "Not Found")
+        candidate = _FRONTEND_DIST / full_path
+        if candidate.is_file() and not candidate.is_symlink():
+            try:
+                candidate.resolve().relative_to(_FRONTEND_DIST.resolve())
+                return FileResponse(candidate)
+            except ValueError:
+                pass
+        return FileResponse(_FRONTEND_DIST / "index.html")
+else:
+    log.warning("Frontend dist not found at %s — skipping SPA mount (run `npm run build` in frontend/)", _FRONTEND_DIST)

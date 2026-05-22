@@ -1,14 +1,26 @@
-const API = '/api';
+const API = (import.meta.env.VITE_API_URL || '') + '/api';
 
 async function request(path, options = {}) {
+  const token = localStorage.getItem('devfleet_token');
   const res = await fetch(`${API}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
+    headers: {
+      'Content-Type': 'application/json',
+      'ngrok-skip-browser-warning': '1',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...options.headers,
+    },
     ...options,
   });
+  if (res.status === 401) {
+    localStorage.removeItem('devfleet_token');
+    window.dispatchEvent(new CustomEvent('devfleet:logout'));
+    throw new Error('Session expired — please log in again');
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || `Request failed: ${res.status}`);
   }
+  if (res.status === 204) return null;
   return res.json();
 }
 
@@ -60,7 +72,8 @@ export const cancelSession = (id) => request(`/sessions/${id}/cancel`, { method:
 
 // ── SSE streaming for live agent output ──
 export function streamSession(sessionId, { onEvent, onBackfill, onDone, onError }) {
-  const evtSource = new EventSource(`${API}/sessions/${sessionId}/stream`);
+  const _tok = localStorage.getItem('devfleet_token') || '';
+  const evtSource = new EventSource(`${API}/sessions/${sessionId}/stream?token=${_tok}&ngrok-skip-browser-warning=1`);
 
   evtSource.onmessage = (e) => {
     try {
@@ -76,10 +89,21 @@ export function streamSession(sessionId, { onEvent, onBackfill, onDone, onError 
       } else if (data.type === 'text' || data.type === 'tool' || data.type === 'tool_result') {
         onEvent?.({ type: data.type, text: data.text });
       } else if (data.type === 'usage') {
+        // Structured event for live header update
+        onEvent?.({ type: 'cost_update', cost: data.cost || 0, usage: data.usage, raw: data });
+        // Summary line embedded in output stream
         const cost = data.cost ? `$${data.cost.toFixed(4)}` : '';
-        const tokens = data.usage ? `${data.usage.input_tokens || 0} in / ${data.usage.output_tokens || 0} out` : '';
-        const parts = [tokens, cost].filter(Boolean).join(' | ');
-        if (parts) onEvent?.({ type: 'usage', text: `\n--- ${parts} ---\n` });
+        const u = data.usage || {};
+        const parts = [
+          u.input_tokens != null ? `${u.input_tokens}↑` : '',
+          u.output_tokens != null ? `${u.output_tokens}↓` : '',
+          u.cache_read_tokens > 0 ? `${u.cache_read_tokens} cached` : '',
+          cost,
+        ].filter(Boolean).join(' · ');
+        if (parts) onEvent?.({ type: 'usage', text: `\n─── ${parts} ───\n` });
+      } else if (data.type === 'cost_update') {
+        // Live heartbeat from backend (every ~60s mid-session)
+        onEvent?.({ type: 'cost_update', cost: data.cost || 0, tokens: data.tokens || 0, raw: data });
       }
     } catch (err) {
       console.error('SSE parse error:', err);
@@ -117,7 +141,8 @@ export const getAutoLoopStatus = (projectId) =>
 
 // ── Remote Control ──
 export function streamRemoteSession(sessionId, { onText, onBackfill, onDone, onError }) {
-  const evtSource = new EventSource(`${API}/sessions/${sessionId}/remote-stream`);
+  const _rtok = localStorage.getItem('devfleet_token') || '';
+  const evtSource = new EventSource(`${API}/sessions/${sessionId}/remote-stream?token=${_rtok}&ngrok-skip-browser-warning=1`);
 
   evtSource.onmessage = (e) => {
     try {
@@ -167,6 +192,8 @@ export const getMissionTypes = () => request('/config/mission-types');
 // ── System Status ──
 export const getSystemStatus = () => request('/system/status');
 export const getSystemFeatures = () => request('/system/features');
+export const setGlobalCeiling = (n) =>
+  request('/system/ceiling', { method: 'PATCH', body: JSON.stringify({ max_agents: n }) });
 
 // ── MCP Servers ──
 export const listMcpServers = (projectId) => request(`/projects/${projectId}/mcp-servers`);
@@ -208,3 +235,38 @@ export const planProject = (prompt, projectPath) => request('/plan', {
 
 // ── Plugins ──
 export const getPlugins = () => request('/plugins');
+
+// ── Lanes ──
+export const listLanes = () => request('/lanes');
+export const updateLane = (name, data) =>
+  request(`/lanes/${name}`, { method: 'PUT', body: JSON.stringify(data) });
+
+// ── Prompt Studio ──
+export const getLanePrompt = (name) => request(`/lanes/${name}/prompt`);
+export const updateLanePrompt = (name, data) =>
+  request(`/lanes/${name}/prompt`, { method: 'PUT', body: JSON.stringify(data) });
+export const getLaneMcpTools = (name) => request(`/lanes/${name}/mcp-tools`);
+export const updateLaneMcpTool = (name, server, tool, data) =>
+  request(
+    `/lanes/${name}/mcp-tools/${encodeURIComponent(server)}/${encodeURIComponent(tool)}`,
+    { method: 'PUT', body: JSON.stringify(data) }
+  );
+export const getLaneCritique = (name) => request(`/lanes/${name}/prompt-critique`);
+export const runLaneCritique = () => request('/lanes/run-critique', { method: 'POST' });
+export const getLanesStudioSummary = () => request('/lanes/studio-summary');
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+export const login = (data) => request('/auth/login', { method: 'POST', body: JSON.stringify(data) });
+export const register = (data) => request('/auth/register', { method: 'POST', body: JSON.stringify(data) });
+export const getMe = () => request('/auth/me');
+export const createInvite = () => request('/auth/invite', { method: 'POST' });
+export const listUsers = () => request('/auth/users');
+
+// ── Global Fleet Events SSE ───────────────────────────────────────────────────
+export function streamFleetEvents({ onEvent, onError }) {
+  const token = localStorage.getItem('devfleet_token') || '';
+  const evtSource = new EventSource(`${API}/events?token=${token}&ngrok-skip-browser-warning=1`);
+  evtSource.onmessage = (e) => { try { onEvent?.(JSON.parse(e.data)); } catch {} };
+  evtSource.onerror = (e) => { onError?.(e); };
+  return () => evtSource.close();
+}

@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any  # kept for type annotations
@@ -28,7 +29,7 @@ from claude_code_sdk import (
     ResultMessage,
 )
 from claude_code_sdk.types import TextBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock
-from claude_code_sdk._errors import MessageParseError
+from claude_code_sdk._errors import MessageParseError, ProcessError
 
 # Monkey-patch the SDK's parse_message to skip rate_limit_event instead of throwing.
 # The SDK raises MessageParseError on unknown types, which kills the subprocess
@@ -55,7 +56,12 @@ _cl.parse_message = _patched_parse
 import db
 from prompt_template import build_prompt
 from worktree import create_worktree, cleanup_worktree
-from models import TOOL_PRESETS, DispatchOptions
+from models import TOOL_PRESETS, LANE_DEFAULTS, MISSION_TYPE_TO_LANE, MODEL_CHOICES, DispatchOptions
+
+# Max wallclock time per session before watchdog cancels it (default 90 min)
+_MAX_SESSION_SECONDS = int(os.getenv("DEVFLEET_MAX_SESSION_MINUTES", "90")) * 60
+# How often to flush last_activity_at to DB (seconds) — avoids per-message writes
+_ACTIVITY_FLUSH_INTERVAL = 60
 
 log = logging.getLogger("devfleet.sdk_engine")
 
@@ -65,6 +71,45 @@ _subscribers: dict[str, list[asyncio.Queue]] = {}
 _event_buffers: dict[str, list[dict]] = {}
 # Sessions being taken over — worktree is preserved on cancel
 _takeover_sessions: set[str] = {}
+
+# ── Lane helpers (lightweight; full accounting lives in lanes.py) ──
+# TTL-cached async DB lookup — DB is source of truth for lane prompts after Prompt Studio edits.
+# Falls back to LANE_DEFAULTS if the DB is unavailable.
+_LANE_PROMPT_CACHE: dict[str, tuple[str, float]] = {}  # name → (text, expires_at)
+_LANE_PROMPT_TTL = 60  # seconds
+
+
+async def _get_lane_prompt_text(lane_name: str) -> str:
+    """Fetch the assembled lane prompt text from DB (TTL-cached 60s). Falls back to LANE_DEFAULTS."""
+    import time as _t
+    cached = _LANE_PROMPT_CACHE.get(lane_name)
+    if cached and cached[1] > _t.monotonic():
+        return cached[0]
+    try:
+        conn = await db.get_db()
+        try:
+            row = await (await conn.execute(
+                "SELECT append_prompt FROM lanes WHERE name = ?", (lane_name,)
+            )).fetchone()
+        finally:
+            await conn.close()
+        if row and row[0]:
+            from lanes import parse_prompt_json, assemble_prompt_text
+            text = assemble_prompt_text(parse_prompt_json(row[0]))
+        else:
+            text = LANE_DEFAULTS.get(lane_name, {}).get("append_prompt", "")
+    except Exception:
+        text = LANE_DEFAULTS.get(lane_name, {}).get("append_prompt", "")
+    _LANE_PROMPT_CACHE[lane_name] = (text, _t.monotonic() + _LANE_PROMPT_TTL)
+    return text
+
+
+def _derive_lane(mission: dict) -> str:
+    """Resolve the effective lane for a mission (mirrors lanes.derive_lane)."""
+    lane = (mission.get("lane") or "").strip()
+    if lane:
+        return lane
+    return MISSION_TYPE_TO_LANE.get(mission.get("mission_type", "implement"), "coder")
 
 
 # ── MCP Server Integration (Phase 2) ──
@@ -114,22 +159,40 @@ def _read_report_file(session_id: str) -> dict | None:
     return None
 
 
-def _build_sdk_options(
+async def _build_sdk_options(
     mission: dict,
     opts: DispatchOptions | None,
     work_dir: str,
+    project_path: str = "",
     session_id: str = "",
     resume_session_id: str | None = None,
     extra_mcp_servers: dict | None = None,
+    github_token: str | None = None,
 ) -> ClaudeCodeOptions:
     """Build ClaudeCodeOptions from mission config + dispatch overrides."""
 
-    # Model selection: override > mission > default
-    model = "claude-opus-4-6"
-    if opts and opts.model:
+    # Model selection: override > mission > lane default > hardcoded default
+    # Validate against MODEL_CHOICES to reject stale/retired model names
+    model = "claude-sonnet-4-6"
+    if opts and opts.model and opts.model in MODEL_CHOICES:
         model = opts.model
-    elif mission.get("model"):
-        model = mission["model"]
+    elif opts and opts.model:
+        log.warning("Dispatch override model '%s' not in MODEL_CHOICES — using lane default", opts.model)
+
+    if model == "claude-sonnet-4-6":  # not yet overridden
+        stored = mission.get("model", "")
+        if stored and stored in MODEL_CHOICES:
+            model = stored
+        elif stored:
+            # Stale model name (e.g. claude-sonnet-4-20250514, claude-opus-4-6)
+            # Fall through to lane default below
+            log.warning("Mission model '%s' is stale/unknown — resolving from lane default", stored)
+
+        if model == "claude-sonnet-4-6":  # still not resolved — try lane default
+            lane = _derive_lane(mission)
+            lane_model = LANE_DEFAULTS.get(lane, {}).get("default_model", "")
+            if lane_model and lane_model in MODEL_CHOICES:
+                model = lane_model
 
     # Allowed tools: override > preset > mission config > full
     allowed_tools = []
@@ -149,8 +212,9 @@ def _build_sdk_options(
     elif mission.get("mission_type") and mission["mission_type"] in TOOL_PRESETS:
         allowed_tools = TOOL_PRESETS[mission["mission_type"]]
 
-    # Allow DevFleet MCP tools
-    allowed_tools.extend([
+    # Allow DevFleet MCP tools (full default set; filtered below by lane_mcp_tools)
+    lane_name = _derive_lane(mission)
+    _all_devfleet_tools = [
         "mcp__devfleet-context__get_mission_context",
         "mcp__devfleet-context__get_project_context",
         "mcp__devfleet-context__get_session_history",
@@ -161,17 +225,55 @@ def _build_sdk_options(
         "mcp__devfleet-tools__request_review",
         "mcp__devfleet-tools__get_sub_mission_status",
         "mcp__devfleet-tools__list_project_missions",
-    ])
+    ]
+    allowed_tools.extend(_all_devfleet_tools)
 
-    # System prompt
-    append_prompt = opts.append_system_prompt if opts and opts.append_system_prompt else None
+    # Filter MCP tools based on per-lane lane_mcp_tools DB settings
+    _tool_hints: list[str] = []
+    try:
+        from lanes import get_lane_mcp_tools as _get_mcp_tools
+        mcp_tool_rows = await _get_mcp_tools(lane_name)
+        if mcp_tool_rows:
+            disabled = {
+                f"mcp__{r['server_name']}__{r['tool_name']}"
+                for r in mcp_tool_rows if not r["enabled"]
+            }
+            if disabled:
+                allowed_tools = [t for t in allowed_tools if t not in disabled]
+            _tool_hints = [
+                f"- {r['server_name']}/{r['tool_name']}: {r['trigger_hint']}"
+                for r in mcp_tool_rows
+                if r.get("trigger_hint") and r["trigger_hint"] != "always" and r["enabled"]
+            ]
+    except Exception as _mcp_err:
+        log.debug("MCP tool filtering skipped: %s", _mcp_err)
 
-    # Max turns
+    # System prompt: lane policy (DB) → dispatch override → compact instruction
+    lane_prompt = await _get_lane_prompt_text(lane_name)
+    compact_instruction = (
+        "\n\nCONTEXT MANAGEMENT: When your context window approaches 199,000 tokens, "
+        "immediately run /compact before continuing. Do not wait for it to fill completely."
+    )
+    if opts and opts.append_system_prompt:
+        append_prompt = opts.append_system_prompt + compact_instruction
+    elif lane_prompt:
+        append_prompt = lane_prompt + compact_instruction
+    else:
+        append_prompt = compact_instruction.strip()
+
+    # Inject MCP tool usage hints into the system prompt
+    if _tool_hints:
+        append_prompt += "\n\nMCP Tool Usage Guidelines:\n" + "\n".join(_tool_hints)
+
+    # Max turns: worktree missions default to 200 (high complexity tolerance)
     max_turns = None
     if opts and opts.max_turns:
         max_turns = opts.max_turns
     elif mission.get("max_turns"):
         max_turns = mission["max_turns"]
+    # High worktree complexity tolerance — no turn limit cap when isolated
+    if max_turns is None and work_dir != project_path:
+        max_turns = 200
 
     # MCP servers — auto-attach DevFleet context + tools as stdio servers
     python_path = sys.executable
@@ -182,7 +284,12 @@ def _build_sdk_options(
         "DEVFLEET_PROJECT_ID": mission.get("project_id", ""),
         "DEVFLEET_SESSION_ID": session_id,
         "DEVFLEET_REPORT_DIR": os.path.join(backend_dir, "..", "data", "reports"),
+        "DEVFLEET_USER_EMAIL": mission.get("created_by_email", ""),
+        "DEVFLEET_USER_NAME": mission.get("created_by_name", ""),
     }
+    if github_token:
+        mcp_env["GITHUB_TOKEN"] = github_token
+        mcp_env["GH_TOKEN"] = github_token
 
     mcp_servers = {
         "devfleet-context": {
@@ -224,6 +331,42 @@ def _build_sdk_options(
     if extra_mcp_servers:
         mcp_servers.update(extra_mcp_servers)
 
+    # ECC global access — agents can read ~/.claude skills, memory, and CLAUDE.md
+    # regardless of which repo or worktree they run in
+    global_ecc = os.path.expanduser("~/.claude")
+    add_dirs: list[str] = []
+    if os.path.isdir(global_ecc):
+        add_dirs.append(global_ecc)
+
+    # Learn-eval Stop hook — every agent session extracts reusable patterns
+    learn_eval_cmd = f"claude -p '/learn-eval' --output-format=text 2>/dev/null || true"
+    stop_hooks = {
+        "Stop": [
+            {
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": learn_eval_cmd}],
+            }
+        ]
+    }
+
+    # Per-user git identity — agents commit as the mission creator when one is
+    # explicitly set on the mission. Otherwise we DON'T set GIT_AUTHOR_*/
+    # GIT_COMMITTER_* env vars at all, so git falls through to the project's
+    # local + global git config (e.g. `git config user.name`). This keeps
+    # commits attributed to the repo owner instead of a generic "DevFleet"
+    # placeholder, which previously violated downstream IP/attribution rules
+    # (commits like `Devfleet <agent@devfleet.local>` had to be rewritten
+    # post-cherry-pick before shipping to protected branches).
+    _creator_name = mission.get("created_by_name")
+    _creator_email = mission.get("created_by_email")
+    _git_env: dict[str, str] = {}
+    if _creator_name and _creator_name.strip():
+        _git_env["GIT_AUTHOR_NAME"] = _creator_name.strip()
+        _git_env["GIT_COMMITTER_NAME"] = _creator_name.strip()
+    if _creator_email and _creator_email.strip():
+        _git_env["GIT_AUTHOR_EMAIL"] = _creator_email.strip()
+        _git_env["GIT_COMMITTER_EMAIL"] = _creator_email.strip()
+
     kwargs = dict(
         model=model,
         max_turns=max_turns,
@@ -233,9 +376,13 @@ def _build_sdk_options(
         cwd=work_dir,
         resume=resume_session_id,
         include_partial_messages=False,
+        hooks=stop_hooks,
+        env={**os.environ, **_git_env},
     )
     if mcp_servers:
         kwargs["mcp_servers"] = mcp_servers
+    if add_dirs:
+        kwargs["add_dirs"] = add_dirs
     return ClaudeCodeOptions(**kwargs)
 
 
@@ -346,26 +493,55 @@ async def _run_agent(
     existing_output: str = "",
     existing_cost: float = 0.0,
     existing_tokens: int = 0,
+    worktree_branch: str | None = None,
+    github_token: str | None = None,
 ):
     """Unified agent runner for both dispatch and resume."""
     output_chunks = []
     total_cost = existing_cost
     total_tokens = existing_tokens
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_cache_read_tokens = 0
+    total_cache_creation_tokens = 0
+    last_cost_flush = time.time()
 
     # Initialize event buffer
     _event_buffers[session_id] = []
+
+    # Tracks whether the SDK actually started streaming (distinguishes dispatch-layer from agent-layer failures)
+    agent_started = False
+    session_timed_out = False
+
+    # Watchdog: cancel this task if agent exceeds the max wallclock limit
+    async def _watchdog():
+        nonlocal session_timed_out
+        await asyncio.sleep(_MAX_SESSION_SECONDS)
+        session_timed_out = True
+        log.warning(
+            "Session %s exceeded %d-minute limit — cancelling (stuck agent or hung subprocess)",
+            session_id, _MAX_SESSION_SECONDS // 60,
+        )
+        current = asyncio.current_task()
+        parent = running_tasks.get(session_id)
+        if parent and parent is not current:
+            parent.cancel()
+
+    watchdog_task = asyncio.create_task(_watchdog())
 
     try:
         # Load per-project MCP configs from DB
         extra_mcp = await _load_project_mcp_configs(mission.get("project_id", ""))
 
-        sdk_options = _build_sdk_options(
+        sdk_options = await _build_sdk_options(
             mission, opts, work_dir,
+            project_path=project_path,
             session_id=session_id,
             resume_session_id=resume_session_id,
             extra_mcp_servers=extra_mcp or None,
+            github_token=github_token,
         )
-        model_used = sdk_options.model or "claude-opus-4-6"
+        model_used = sdk_options.model or "claude-sonnet-4-6"
 
         log.info(
             "SDK dispatch session %s for mission '%s' in %s (model: %s, worktree: %s, resume: %s)",
@@ -383,10 +559,33 @@ async def _run_agent(
         })
 
         claude_session_id = ""
+        last_activity_flush = time.time()
 
         # Stream messages from the SDK
         # Wrap in safe iterator to skip unparseable events (e.g. rate_limit_event)
         async for message in _safe_query(prompt=prompt, options=sdk_options):
+            agent_started = True  # SDK yielded at least one message — agent actually spawned
+
+            # Throttled heartbeat — flushes activity timestamp + running cost to DB once per minute
+            now = time.time()
+            if now - last_activity_flush >= _ACTIVITY_FLUSH_INTERVAL:
+                last_activity_flush = now
+                try:
+                    _conn = await db.get_db()
+                    await _conn.execute(
+                        """UPDATE agent_sessions
+                           SET last_activity_at=?, total_cost_usd=?, total_tokens=?
+                           WHERE id=?""",
+                        (datetime.now(timezone.utc).isoformat(),
+                         total_cost, total_tokens, session_id),
+                    )
+                    await _conn.commit()
+                    await _conn.close()
+                    # Broadcast live cost update to frontend
+                    if total_cost > 0:
+                        _broadcast(session_id, {"type": "cost_update", "cost": total_cost, "tokens": total_tokens})
+                except Exception:
+                    pass
             if isinstance(message, SystemMessage):
                 # Capture session ID for resume capability
                 claude_session_id = message.data.get("session_id", "") or ""
@@ -426,23 +625,42 @@ async def _run_agent(
                         output_chunks.append(result_text)
                         _broadcast(session_id, {"type": "text", "text": "\n" + result_text})
 
-                # Extract cost and usage — ResultMessage has direct attrs
-                usage = message.usage  # dict or None
-                cost = message.total_cost_usd  # float or None
-                input_t = 0
-                output_t = 0
-                if usage and isinstance(usage, dict):
-                    input_t = usage.get("input_tokens", 0) or 0
-                    output_t = usage.get("output_tokens", 0) or 0
-                    total_tokens = existing_tokens + input_t + output_t
-                if cost:
-                    total_cost = existing_cost + cost
-                if cost or usage:
-                    _broadcast(session_id, {
-                        "type": "usage",
-                        "usage": {"input_tokens": input_t, "output_tokens": output_t},
-                        "cost": total_cost,
-                    })
+                # Extract usage — SDK returns Usage object or dict; handle both
+                usage = message.usage
+                cost = message.total_cost_usd or 0.0
+
+                def _get(obj, key, default=0):
+                    if obj is None:
+                        return default
+                    if isinstance(obj, dict):
+                        return obj.get(key, default) or default
+                    return getattr(obj, key, default) or default
+
+                input_t = _get(usage, "input_tokens")
+                output_t = _get(usage, "output_tokens")
+                cache_read_t = _get(usage, "cache_read_input_tokens")
+                cache_create_t = _get(usage, "cache_creation_input_tokens")
+
+                # SDK input_tokens is already non-cached input only.
+                # cache_read_input_tokens and cache_creation_input_tokens are tracked separately.
+                # total_tokens = input + output (display); cache cols hold full cache breakdown.
+                total_input_tokens += input_t
+                total_output_tokens += output_t
+                total_cache_read_tokens += cache_read_t
+                total_cache_creation_tokens += cache_create_t
+                total_tokens = existing_tokens + total_input_tokens + total_output_tokens
+                total_cost = existing_cost + cost
+
+                _broadcast(session_id, {
+                    "type": "usage",
+                    "usage": {
+                        "input_tokens": billable_input,
+                        "output_tokens": output_t,
+                        "cache_read_tokens": cache_read_t,
+                        "cache_creation_tokens": cache_create_t,
+                    },
+                    "cost": total_cost,
+                })
 
         # Agent finished successfully
         full_output = "".join(output_chunks)
@@ -461,9 +679,11 @@ async def _run_agent(
             await conn.execute(
                 """UPDATE agent_sessions
                    SET status='completed', ended_at=?, exit_code=0, output_log=?,
-                       total_cost_usd=?, total_tokens=?
+                       total_cost_usd=?, total_tokens=?,
+                       cache_read_tokens=?, cache_creation_tokens=?
                    WHERE id=?""",
-                (ended_at, full_output, total_cost, total_tokens, session_id),
+                (ended_at, full_output, total_cost, total_tokens,
+                 total_cache_read_tokens, total_cache_creation_tokens, session_id),
             )
             await conn.execute(
                 "UPDATE missions SET status='completed', updated_at=? WHERE id=?",
@@ -500,8 +720,9 @@ async def _run_agent(
 
         # Cleanup worktree — auto-merge if successful
         if worktree_path:
-            await cleanup_worktree(project_path, session_id, merge=True)
+            await cleanup_worktree(project_path, session_id, merge=True, branch_name=worktree_branch)
 
+        watchdog_task.cancel()
         _broadcast(session_id, {
             "type": "done", "status": "completed", "exit_code": 0,
             "cost": total_cost, "tokens": total_tokens,
@@ -509,23 +730,27 @@ async def _run_agent(
         log.info("Session %s completed (cost $%.4f, tokens %d)", session_id, total_cost, total_tokens)
 
     except asyncio.CancelledError:
+        watchdog_task.cancel()
         is_takeover = session_id in _takeover_sessions
         _takeover_sessions.discard(session_id)
-        log.info("Session %s %s", session_id, "taken over" if is_takeover else "cancelled")
+        cancel_reason = "timed out" if session_timed_out else ("taken over" if is_takeover else "cancelled")
+        log.info("Session %s %s", session_id, cancel_reason)
         ended_at = datetime.now(timezone.utc).isoformat()
         full_output = "".join(output_chunks)
         if existing_output:
             full_output = existing_output + "\n--- RESUMED ---\n" + full_output
 
-        new_status = "takeover" if is_takeover else "cancelled"
+        new_status = "timed_out" if session_timed_out else ("takeover" if is_takeover else "cancelled")
         mission_status = "running" if is_takeover else "failed"
         conn = await db.get_db()
         try:
             await conn.execute(
                 """UPDATE agent_sessions SET status=?, ended_at=?, output_log=?,
-                       total_cost_usd=?, total_tokens=?
+                       total_cost_usd=?, total_tokens=?,
+                       cache_read_tokens=?, cache_creation_tokens=?
                    WHERE id=?""",
-                (new_status, ended_at, full_output, total_cost, total_tokens, session_id),
+                (new_status, ended_at, full_output, total_cost, total_tokens,
+                 total_cache_read_tokens, total_cache_creation_tokens, session_id),
             )
             await conn.execute(
                 "UPDATE missions SET status=?, updated_at=? WHERE id=?",
@@ -537,11 +762,21 @@ async def _run_agent(
 
         if worktree_path and not is_takeover:
             # Only delete worktree on regular cancel, NOT on takeover
-            await cleanup_worktree(project_path, session_id, merge=False)
+            await cleanup_worktree(project_path, session_id, merge=False, branch_name=worktree_branch)
         _broadcast(session_id, {"type": "done", "status": new_status})
 
     except Exception as e:
-        log.exception("Session %s error: %s", session_id, e)
+        watchdog_task.cancel()
+        failure_layer = "agent" if agent_started else "dispatch"
+        # Detect OOM kills: SIGKILL from the OS surfaces as ProcessError with exit_code=-9
+        oom_killed = isinstance(e, ProcessError) and getattr(e, "exit_code", None) == -9
+        if oom_killed:
+            log.error(
+                "Session %s OOM-killed (SIGKILL, exit -9) — agent process killed by OS memory pressure",
+                session_id,
+            )
+        else:
+            log.exception("Session %s %s-layer error: %s", session_id, failure_layer, e)
         ended_at = datetime.now(timezone.utc).isoformat()
         full_output = "".join(output_chunks)
         if existing_output:
@@ -551,25 +786,74 @@ async def _run_agent(
         try:
             await conn.execute(
                 """UPDATE agent_sessions SET status='failed', ended_at=?, output_log=?, error_log=?,
-                       total_cost_usd=?, total_tokens=?
+                       total_cost_usd=?, total_tokens=?,
+                       cache_read_tokens=?, cache_creation_tokens=?
                    WHERE id=?""",
-                (ended_at, full_output, str(e), total_cost, total_tokens, session_id),
+                (ended_at, full_output, str(e), total_cost, total_tokens,
+                 total_cache_read_tokens, total_cache_creation_tokens, session_id),
             )
             await conn.execute(
                 "UPDATE missions SET status='failed', updated_at=? WHERE id=?",
                 (ended_at, mission["id"]),
             )
+            # Record failure layer for observability and downstream classification
+            await conn.execute(
+                "INSERT INTO mission_events (mission_id, event_type, data, failure_layer) VALUES (?, ?, ?, ?)",
+                (mission["id"], "session_failed",
+                 json.dumps({"session_id": session_id, "error": str(e)[:500],
+                             "oom_killed": oom_killed}),
+                 failure_layer),
+            )
             await conn.commit()
+
+            # Dispatch-layer failures are orchestrator bugs, not agent bugs.
+            # Auto-retry once with a short backoff so transient errors (e.g. hot-reload races)
+            # self-heal. Agent-layer failures need code changes — never auto-retry.
+            if failure_layer == "dispatch":
+                prior_failures = await conn.execute(
+                    """SELECT COUNT(*) FROM mission_events
+                       WHERE mission_id=? AND event_type='session_failed'
+                         AND failure_layer='dispatch'
+                         AND created_at >= datetime('now', '-10 minutes')""",
+                    (mission["id"],),
+                )
+                row = await prior_failures.fetchone()
+                prior_count = row[0] if row else 0
+                if prior_count <= 1:
+                    log.warning(
+                        "Mission %s dispatch failure #%d — scheduling auto-retry in 10s",
+                        mission["id"], prior_count,
+                    )
+                    asyncio.create_task(_dispatch_retry(mission["id"], delay=10))
         finally:
             await conn.close()
 
         if worktree_path:
-            await cleanup_worktree(project_path, session_id, merge=False)
-        _broadcast(session_id, {"type": "done", "status": "failed", "error": str(e)})
+            await cleanup_worktree(project_path, session_id, merge=False, branch_name=worktree_branch)
+        _broadcast(session_id, {"type": "done", "status": "failed", "error": str(e),
+                                  "failure_layer": failure_layer})
 
     finally:
         running_tasks.pop(session_id, None)
         _event_buffers.pop(session_id, None)
+
+
+async def _dispatch_retry(mission_id: str, delay: int = 10):
+    """Reset a dispatch-failed mission to 'draft' after a short delay so mission_watcher retries it."""
+    await asyncio.sleep(delay)
+    try:
+        conn = await db.get_db()
+        try:
+            await conn.execute(
+                "UPDATE missions SET status='draft', updated_at=datetime('now') WHERE id=? AND status='failed'",
+                (mission_id,),
+            )
+            await conn.commit()
+            log.info("Mission %s reset to draft for dispatch retry", mission_id)
+        finally:
+            await conn.close()
+    except Exception as err:
+        log.warning("Failed to reset mission %s for retry: %s", mission_id, err)
 
 
 async def dispatch_mission(
@@ -577,6 +861,7 @@ async def dispatch_mission(
     mission: dict,
     last_report: dict | None,
     opts: DispatchOptions | None = None,
+    github_token: str | None = None,
 ):
     """Spawn an agent via SDK to work on a mission."""
     from app import resolve_path
@@ -584,8 +869,19 @@ async def dispatch_mission(
     full_prompt = build_prompt(mission, last_report)
     project_path = resolve_path(mission["project_path"])
 
-    worktree_path = await create_worktree(project_path, session_id)
+    worktree_path, worktree_branch = await create_worktree(project_path, session_id, mission=mission)
     work_dir = worktree_path or project_path
+
+    if worktree_branch:
+        _conn = await db.get_db()
+        try:
+            await _conn.execute(
+                "UPDATE agent_sessions SET branch_name=? WHERE id=?",
+                (worktree_branch, session_id),
+            )
+            await _conn.commit()
+        finally:
+            await _conn.close()
 
     await _run_agent(
         session_id=session_id,
@@ -595,6 +891,8 @@ async def dispatch_mission(
         worktree_path=worktree_path,
         project_path=project_path,
         opts=opts,
+        worktree_branch=worktree_branch,
+        github_token=github_token,
     )
 
 
@@ -620,8 +918,19 @@ async def resume_mission(
     finally:
         await conn.close()
 
-    worktree_path = await create_worktree(project_path, session_id)
+    worktree_path, worktree_branch = await create_worktree(project_path, session_id, mission=mission)
     work_dir = worktree_path or project_path
+
+    if worktree_branch:
+        _conn = await db.get_db()
+        try:
+            await _conn.execute(
+                "UPDATE agent_sessions SET branch_name=? WHERE id=?",
+                (worktree_branch, session_id),
+            )
+            await _conn.commit()
+        finally:
+            await _conn.close()
 
     await _run_agent(
         session_id=session_id,
@@ -635,6 +944,7 @@ async def resume_mission(
         existing_output=existing.get("output_log", ""),
         existing_cost=existing.get("total_cost_usd") or 0,
         existing_tokens=existing.get("total_tokens") or 0,
+        worktree_branch=worktree_branch,
     )
 
 

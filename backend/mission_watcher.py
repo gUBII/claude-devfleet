@@ -27,11 +27,11 @@ POLL_INTERVAL = int(os.environ.get("DEVFLEET_WATCHER_INTERVAL", "5"))
 MAX_CONCURRENT_AGENTS = int(os.environ.get("DEVFLEET_MAX_AGENTS", "3"))
 
 
-async def _find_eligible_missions(limit: int) -> list[dict]:
-    """Find auto_dispatch missions whose dependencies are all completed."""
+async def _find_eligible_missions(lane_capacity: dict[str, int]) -> list[dict]:
+    """Find auto_dispatch missions whose dependencies are all completed and whose target lane has capacity."""
+    from lanes import derive_lane
     conn = await db.get_db()
     try:
-        # SQLite json_each lets us check each dependency ID is completed
         rows = await conn.execute_fetchall(
             """SELECT m.*, p.path AS project_path, p.name AS project_name
                FROM missions m
@@ -45,21 +45,29 @@ async def _find_eligible_missions(limit: int) -> list[dict]:
                    )
                  )
                ORDER BY m.priority DESC, m.created_at ASC
-               LIMIT ?""",
-            (limit,),
+               LIMIT 50""",
         )
-        return [dict(r) for r in rows]
+        # Post-filter: only return missions whose target lane has free slots
+        eligible = []
+        for row in rows:
+            m = dict(row)
+            target_lane = derive_lane(m)
+            if lane_capacity.get(target_lane, 0) > 0:
+                eligible.append(m)
+                # Decrement optimistically so we don't dispatch two missions to the same full lane
+                lane_capacity[target_lane] -= 1
+        return eligible
     finally:
         await conn.close()
 
 
-async def _emit_event(mission_id: str, event_type: str, source_mission_id: str | None = None, data: dict | None = None):
+async def _emit_event(mission_id: str, event_type: str, source_mission_id: str | None = None, data: dict | None = None, failure_layer: str | None = None):
     """Record a mission event for observability."""
     conn = await db.get_db()
     try:
         await conn.execute(
-            "INSERT INTO mission_events (mission_id, event_type, source_mission_id, data) VALUES (?, ?, ?, ?)",
-            (mission_id, event_type, source_mission_id, json.dumps(data or {})),
+            "INSERT INTO mission_events (mission_id, event_type, source_mission_id, data, failure_layer) VALUES (?, ?, ?, ?, ?)",
+            (mission_id, event_type, source_mission_id, json.dumps(data or {}), failure_layer),
         )
         await conn.commit()
     except Exception as e:
@@ -96,7 +104,7 @@ async def _dispatch_eligible(mission: dict):
         last_report = dict(rows[0]) if rows else None
 
         # Create session
-        model = mission.get("model") or "claude-opus-4-6"
+        model = mission.get("model") or "claude-sonnet-4-6"
         await conn.execute(
             "INSERT INTO agent_sessions (id, mission_id, model) VALUES (?, ?, ?)",
             (session_id, mission_id, model),
@@ -117,26 +125,118 @@ async def _dispatch_eligible(mission: dict):
     running_tasks[session_id] = task
 
 
+async def _reap_stuck_sessions():
+    """Find sessions silent for > STUCK_THRESHOLD and cancel their tasks."""
+    stuck_threshold_minutes = int(os.environ.get("DEVFLEET_STUCK_THRESHOLD_MINUTES", "5"))
+    conn = await db.get_db()
+    try:
+        stuck = await conn.execute_fetchall(
+            """SELECT s.id, s.mission_id FROM agent_sessions s
+               WHERE s.status = 'running'
+                 AND (
+                   s.last_activity_at IS NULL
+                   OR s.last_activity_at < datetime('now', ? || ' minutes')
+                 )
+                 AND s.started_at < datetime('now', '-5 minutes')""",
+            (f"-{stuck_threshold_minutes}",),
+        )
+    finally:
+        await conn.close()
+
+    # Reap 'running' sessions that have gone silent. The remote-ghost branch
+    # further down must run regardless of whether any 'running' sessions are
+    # stuck, so we no longer early-return when this query is empty.
+    if stuck:
+        from sdk_engine import running_tasks
+        for row in stuck:
+            session_id = row["id"]
+            task = running_tasks.get(session_id)
+            if task and not task.done():
+                log.warning(
+                    "Session %s has been silent for >%d min — cancelling as stuck",
+                    session_id, stuck_threshold_minutes,
+                )
+                task.cancel()
+            elif not task:
+                # No task running but DB says running — orphaned session, mark failed
+                conn2 = await db.get_db()
+                try:
+                    now = datetime.now(timezone.utc).isoformat()
+                    await conn2.execute(
+                        "UPDATE agent_sessions SET status='failed', ended_at=? WHERE id=?",
+                        (now, session_id),
+                    )
+                    await conn2.execute(
+                        "UPDATE missions SET status='failed', updated_at=? WHERE id=?",
+                        (now, row["mission_id"]),
+                    )
+                    await conn2.commit()
+                    log.warning("Cleaned up orphaned session %s (no task, DB said running)", session_id)
+                finally:
+                    await conn2.close()
+
+    # ── Reap abandoned remote sessions ──────────────────────────────────────────
+    remote_timeout_hours = int(os.environ.get("DEVFLEET_REMOTE_TIMEOUT_HOURS", "2"))
+    conn3 = await db.get_db()
+    try:
+        ghost_remotes = await conn3.execute_fetchall(
+            """SELECT s.id, s.mission_id FROM agent_sessions s
+               WHERE s.status = 'remote'
+                 AND s.last_activity_at IS NULL
+                 AND s.started_at < datetime('now', ? || ' hours')""",
+            (f"-{remote_timeout_hours}",),
+        )
+    finally:
+        await conn3.close()
+
+    for row in ghost_remotes:
+        conn4 = await db.get_db()
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            await conn4.execute(
+                "UPDATE agent_sessions SET status='cancelled', ended_at=?, "
+                "error_log='Remote session abandoned — auto-expired after ' || ? || 'h with no activity' "
+                "WHERE id=?",
+                (now, str(remote_timeout_hours), row["id"]),
+            )
+            await conn4.execute(
+                "UPDATE missions SET status='failed', updated_at=? WHERE id=? AND status='running'",
+                (now, row["mission_id"]),
+            )
+            await conn4.commit()
+            log.warning("Reaped ghost remote session %s (no activity, >%dh old)", row["id"], remote_timeout_hours)
+        finally:
+            await conn4.close()
+
+
 async def _watch_loop():
-    """Main polling loop — find and dispatch eligible missions."""
+    """Main polling loop — find and dispatch eligible missions, reap stuck sessions."""
     log.info("Mission watcher started (poll every %ds)", POLL_INTERVAL)
 
     while True:
         try:
             # Import here to get current state
             from sdk_engine import running_tasks
+            from lanes import free_slots as lane_free_slots
 
+            # Reap sessions that have gone silent
+            await _reap_stuck_sessions()
+
+            # Global ceiling check (safety override)
             running = sum(1 for t in running_tasks.values() if not t.done())
-            slots = MAX_CONCURRENT_AGENTS - running
-
-            if slots > 0:
-                eligible = await _find_eligible_missions(limit=slots)
-                for mission in eligible:
-                    try:
-                        await _dispatch_eligible(mission)
-                    except Exception as e:
-                        log.error("Failed to auto-dispatch mission %s: %s", mission["id"], e)
-                        await _emit_event(mission["id"], "dispatch_failed", data={"error": str(e)})
+            if running >= MAX_CONCURRENT_AGENTS:
+                pass  # global cap hit — skip dispatch this cycle
+            else:
+                # Per-lane capacity — only dispatch to lanes with free slots
+                lane_capacity = await lane_free_slots()
+                if lane_capacity:
+                    eligible = await _find_eligible_missions(lane_capacity)
+                    for mission in eligible:
+                        try:
+                            await _dispatch_eligible(mission)
+                        except Exception as e:
+                            log.error("Failed to auto-dispatch mission %s: %s", mission["id"], e)
+                            await _emit_event(mission["id"], "dispatch_failed", data={"error": str(e)})
 
         except asyncio.CancelledError:
             raise
