@@ -207,6 +207,16 @@ _mcp_sse = SseServerTransport("/messages/")
 
 class _McpSseEndpoint:
     async def __call__(self, scope, receive, send):
+        from starlette.requests import Request
+        from starlette.responses import PlainTextResponse
+
+        request = Request(scope, receive, send)
+        ok, reason = _check_mcp_request(request)
+        if not ok:
+            log.warning("MCP SSE rejected: %s", reason)
+            await PlainTextResponse(reason, status_code=403)(scope, receive, send)
+            return
+
         log.warning(
             "DEPRECATED MCP/SSE transport hit — removal scheduled %s. "
             "Switch clients to Streamable HTTP at /mcp/.",
@@ -224,6 +234,16 @@ class _McpSseEndpoint:
 
 class _McpPostEndpoint:
     async def __call__(self, scope, receive, send):
+        from starlette.requests import Request
+        from starlette.responses import PlainTextResponse
+
+        request = Request(scope, receive, send)
+        ok, reason = _check_mcp_request(request)
+        if not ok:
+            log.warning("MCP POST rejected: %s", reason)
+            await PlainTextResponse(reason, status_code=403)(scope, receive, send)
+            return
+
         log.warning(
             "DEPRECATED MCP/SSE POST endpoint hit — removal scheduled %s.",
             DEVFLEET_SSE_REMOVAL_DATE,
@@ -272,14 +292,48 @@ async def _ensure_http_transport(session_id: str) -> StreamableHTTPServerTranspo
     return transport
 
 
+# MCP HTTP spec MUSTs (2025-11-25):
+#   1. Validate Origin header to prevent DNS rebinding
+#   2. Authenticate connections (header token here; OAuth 2.1 future)
+# Rate limit is layered on via slowapi.
+_MCP_ORIGIN_ALLOWLIST = set(_ALLOWED_ORIGINS) | {
+    "https://farhanfleet.nexis365.com.au",  # canonical tunnel
+}
+
+
+def _check_mcp_request(request) -> tuple[bool, str]:
+    """Return (ok, reason). Used by every /mcp/* handler."""
+    # Origin validation — spec MUST. Browsers send Origin on cross-origin POST;
+    # MCP SDK clients send it for HTTP transport. Stdio sub-process MCP servers
+    # never hit this path so they're unaffected.
+    origin = request.headers.get("origin")
+    if origin and origin not in _MCP_ORIGIN_ALLOWLIST:
+        return False, f"Origin {origin!r} not in allowlist"
+    # Header-token auth — only enforced when DEVFLEET_MCP_KEY is set in env.
+    # Empty/unset = dev mode (matches the prior implicit behavior).
+    if _MCP_API_KEY:
+        token = request.headers.get("x-devfleet-token", "")
+        if token != _MCP_API_KEY:
+            return False, "Missing or invalid X-DevFleet-Token"
+    return True, ""
+
+
 class _McpHttpEndpoint:
     """Streamable HTTP MCP endpoint — handles GET, POST, DELETE on /mcp."""
 
     async def __call__(self, scope, receive, send):
         import uuid as _uuid
         from starlette.requests import Request
+        from starlette.responses import PlainTextResponse
 
         request = Request(scope, receive, send)
+
+        ok, reason = _check_mcp_request(request)
+        if not ok:
+            log.warning("MCP HTTP rejected: %s", reason)
+            await PlainTextResponse(reason, status_code=403)(scope, receive, send)
+            return
+
         session_id = request.headers.get("mcp-session-id")
 
         if request.method == "DELETE":
