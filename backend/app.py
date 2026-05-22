@@ -522,14 +522,53 @@ async def hitl_ask(sid: str, body: HitlAskRequest, request: Request):
     try:
         reply = await asyncio.wait_for(fut, timeout=hitl_state.HITL_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
+        # CRITICAL: never fabricate a human reply on timeout. Industry-leading
+        # platforms (LangGraph, Temporal, Cloudflare) wait indefinitely on a
+        # durable checkpoint; the next-best step for a non-durable system is to
+        # cancel the mission and notify, NOT to invent a "Proceed with best
+        # judgment" reply the operator never made. See Replit Jul-2025 incident.
         hitl_state.cancel(sid)
         conn = await db.get_db()
         try:
-            await conn.execute("UPDATE agent_sessions SET status='running' WHERE id=?", (sid,))
+            # Mark the question as unanswered and the session as cancelled.
+            await conn.execute(
+                "UPDATE hitl_questions SET reply=NULL, answered_at=datetime('now') WHERE id=?",
+                (qid,),
+            )
+            await conn.execute(
+                "UPDATE agent_sessions SET status='cancelled_no_approval', "
+                "error_log=COALESCE(error_log,'') || ? WHERE id=?",
+                (f"\nHITL timeout — no human reply within {hitl_state.HITL_TIMEOUT_SECONDS}s\n", sid),
+            )
+            # Mission-event for the audit trail.
+            mission_id = None
+            row = await conn.execute_fetchall(
+                "SELECT mission_id FROM agent_sessions WHERE id=?", (sid,)
+            )
+            if row:
+                mission_id = row[0]["mission_id"]
+            if mission_id:
+                await conn.execute(
+                    "INSERT INTO mission_events (id, mission_id, event_type, data, created_at) "
+                    "VALUES (?, ?, 'hitl_timeout_cancelled', ?, datetime('now'))",
+                    (str(uuid.uuid4()), mission_id, json.dumps({"session_id": sid, "question": body.question})),
+                )
             await conn.commit()
         finally:
             await conn.close()
-        return {"reply": "No reply received within 10 minutes. Proceed with best judgment."}
+        _broadcast(sid, {"type": "hitl_timeout_cancelled", "question": body.question})
+        await fleet_bus.broadcast({
+            "type": "mission_cancelled_no_approval",
+            "session_id": sid,
+            "question": body.question,
+        })
+        # 408 Request Timeout — surfaces a clear failure to the MCP caller so
+        # the agent's tool-call returns an explicit "no answer" signal, not a
+        # synthetic decision. The session is now status=cancelled_no_approval.
+        raise HTTPException(
+            status_code=408,
+            detail=f"HITL timeout — no human reply within {hitl_state.HITL_TIMEOUT_SECONDS}s; mission cancelled",
+        )
 
     conn = await db.get_db()
     try:

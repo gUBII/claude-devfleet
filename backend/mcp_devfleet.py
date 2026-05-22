@@ -372,9 +372,19 @@ async def _list_project_missions(args: dict) -> list[types.TextContent]:
 
 
 async def _ask_human(args: dict) -> list[types.TextContent]:
-    """Block until the human operator replies via the DevFleet UI (up to 10 min)."""
+    """Block until the human operator replies via the DevFleet UI (up to 10 min).
+
+    On any failure mode — no session, timeout, connection error — this returns
+    a clear "no answer" signal. It NEVER fabricates a synthetic human decision
+    ("Proceed with best judgment"). The agent must treat that signal as a stop:
+    the mission has typically been transitioned to cancelled_no_approval
+    server-side already.
+    """
     if not SESSION_ID:
-        return [types.TextContent(type="text", text="Cannot ask human: no session context. Proceed with best judgment.")]
+        return [types.TextContent(
+            type="text",
+            text="HITL UNAVAILABLE: no session context for ask_human. Do not assume approval — stop and surface the question in your next report.",
+        )]
 
     question = args.get("question", "")
     options = args.get("options", [])
@@ -387,9 +397,21 @@ async def _ask_human(args: dict) -> list[types.TextContent]:
             if resp.status_code == 200:
                 reply = resp.json().get("reply", "")
                 return [types.TextContent(type="text", text=f"Human replied: {reply}")]
-            return [types.TextContent(type="text", text=f"HITL endpoint returned {resp.status_code}. Proceed with best judgment.")]
-    except Exception:
-        return [types.TextContent(type="text", text="No reply received (timeout or connection error). Proceed with best judgment.")]
+            if resp.status_code == 408:
+                # Server transitioned mission to cancelled_no_approval.
+                return [types.TextContent(
+                    type="text",
+                    text="HITL TIMEOUT: no human reply within 10 minutes. Mission has been CANCELLED by the server (status=cancelled_no_approval). Do not continue making changes. Surface this in your next report so the operator can re-dispatch.",
+                )]
+            return [types.TextContent(
+                type="text",
+                text=f"HITL FAILED with status {resp.status_code}. Do not assume approval. Stop and surface this in your next report.",
+            )]
+    except Exception as e:
+        return [types.TextContent(
+            type="text",
+            text=f"HITL CONNECTION ERROR ({type(e).__name__}). Do not assume approval. Stop and surface this in your next report.",
+        )]
 
 
 async def main():
