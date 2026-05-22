@@ -43,6 +43,138 @@ async def _api_get(path: str) -> dict | list | None:
     return None
 
 
+# ──────────────────────────────────────────────
+# Resources — URI-addressable read-only context.
+# Industry convention (philschmid, Speakeasy, Zuplo): Resources for data the
+# client should KNOW, Tools for what the client can DO. Read-only context fits
+# Resources; we keep the equivalent Tools in place for back-compat so clients
+# that don't query resources still work.
+# ──────────────────────────────────────────────
+
+
+@server.list_resources()
+async def list_resources() -> list[types.Resource]:
+    res: list[types.Resource] = []
+    if MISSION_ID:
+        res.append(types.Resource(
+            uri=f"devfleet://mission/{MISSION_ID}/context",
+            name=f"Current mission context ({MISSION_ID[:8]})",
+            description="Requirements, acceptance criteria, status of the current mission.",
+            mimeType="application/json",
+        ))
+        res.append(types.Resource(
+            uri=f"devfleet://mission/{MISSION_ID}/session-history",
+            name="Previous session reports for this mission",
+            description="Reports from prior agents that worked on this mission (continuity).",
+            mimeType="application/json",
+        ))
+    if PROJECT_ID:
+        res.append(types.Resource(
+            uri=f"devfleet://project/{PROJECT_ID}/context",
+            name="Current project context",
+            description="Project info + recent mission history.",
+            mimeType="application/json",
+        ))
+    res.append(types.Resource(
+        uri="devfleet://fleet/team-context",
+        name="Team context (other running agents)",
+        description="What other agents are currently working on, fleet-wide.",
+        mimeType="application/json",
+    ))
+    res.append(types.Resource(
+        uri="devfleet://fleet/shape",
+        name="Fleet shape — all lane capacity",
+        description="Full lane topology: max_agents, running, free, model per lane.",
+        mimeType="application/json",
+    ))
+    return res
+
+
+@server.read_resource()
+async def read_resource(uri) -> str:
+    # uri arrives as a pydantic AnyUrl object in mcp>=1.0; coerce to str.
+    s = str(uri)
+    if s.startswith("devfleet://mission/") and s.endswith("/context"):
+        mid = s.split("/")[3]
+        # Reuse the same fetch logic the Tool uses; emit pure JSON for Resources
+        # (Resources are data; no human-prose wrapper).
+        data = await _api_get(f"/api/missions/{mid}")
+        if not data:
+            return json.dumps({"error": f"Mission {mid} not found"})
+        return json.dumps({
+            "mission_id": data["id"],
+            "title": data["title"],
+            "detailed_prompt": data["detailed_prompt"],
+            "acceptance_criteria": data.get("acceptance_criteria", ""),
+            "status": data["status"],
+            "mission_type": data.get("mission_type", "implement"),
+            "model": data.get("model", ""),
+            "latest_report": data.get("latest_report"),
+        }, indent=2)
+    if s.startswith("devfleet://mission/") and s.endswith("/session-history"):
+        mid = s.split("/")[3]
+        reports = await _api_get(f"/api/reports?mission_id={mid}") or []
+        return json.dumps([
+            {
+                "created_at": r.get("created_at", ""),
+                "what_done": r.get("what_done", ""),
+                "what_open": r.get("what_open", ""),
+                "next_steps": r.get("next_steps", ""),
+                "errors_encountered": r.get("errors_encountered", ""),
+            }
+            for r in reports[:5]
+        ], indent=2)
+    if s.startswith("devfleet://project/") and s.endswith("/context"):
+        pid = s.split("/")[3]
+        data = await _api_get(f"/api/projects/{pid}")
+        if not data:
+            return json.dumps({"error": f"Project {pid} not found"})
+        missions = data.get("missions", [])
+        return json.dumps({
+            "project_name": data["name"],
+            "project_path": data["path"],
+            "description": data.get("description", ""),
+            "total_missions": len(missions),
+            "recent_missions": [
+                {"id": m["id"], "title": m["title"], "status": m["status"], "type": m.get("mission_type", "")}
+                for m in missions[:10]
+            ],
+        }, indent=2)
+    if s == "devfleet://fleet/team-context":
+        sessions = await _api_get("/api/sessions?status=running") or []
+        team = [
+            {
+                "session_id": x["id"],
+                "mission_title": x.get("mission_title", ""),
+                "project_name": x.get("project_name", ""),
+                "status": x["status"],
+                "started_at": x.get("started_at", ""),
+            }
+            for x in sessions if x["id"] != SESSION_ID
+        ]
+        return json.dumps(team, indent=2)
+    if s == "devfleet://fleet/shape":
+        lanes = await _api_get("/api/lanes") or []
+        total_slots = sum(l.get("max_agents", 0) for l in lanes)
+        total_free = sum(l.get("free", 0) for l in lanes)
+        return json.dumps({
+            "total_slots": total_slots,
+            "total_free": total_free,
+            "lanes": [
+                {
+                    "name": l["name"],
+                    "icon": l.get("icon", ""),
+                    "max_agents": l.get("max_agents", 0),
+                    "running": l.get("running", 0),
+                    "free": l.get("free", 0),
+                    "model": l.get("default_model", ""),
+                }
+                for l in lanes
+            ],
+        }, indent=2)
+    return json.dumps({"error": f"Unknown resource URI: {s}"})
+
+
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
     return [
