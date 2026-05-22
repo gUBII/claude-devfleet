@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { getDashboardStats } from '../api/client';
 import { useAuth } from '../auth';
 
@@ -12,21 +12,31 @@ const NAV = [
   { id: 'prompt-studio', label: 'Prompt Studio', icon: 'M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z' },
 ];
 
-export default function Sidebar({ activePage, navigate }) {
+export default function Sidebar({ activePage, navigate, agentDelta = 0 }) {
   const { user, logout, isAdmin } = useAuth();
   const [runningAgents, setRunningAgents] = useState(0);
+  const prevDelta = useRef(0);
 
   useEffect(() => {
     const poll = async () => {
       try {
         const stats = await getDashboardStats();
         setRunningAgents(stats.running_agents || 0);
+        prevDelta.current = agentDelta;
       } catch {}
     };
     poll();
     const id = setInterval(poll, 5000);
     return () => clearInterval(id);
   }, []);
+
+  useEffect(() => {
+    const diff = agentDelta - prevDelta.current;
+    if (diff !== 0) {
+      setRunningAgents(prev => Math.max(0, prev + diff));
+      prevDelta.current = agentDelta;
+    }
+  }, [agentDelta]);
 
   const isActive = runningAgents > 0;
 

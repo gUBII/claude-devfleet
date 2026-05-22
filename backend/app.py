@@ -381,19 +381,7 @@ async def auth_list_users(request: Request):
 # ──────────────────────────────────────────────
 # Fleet Events SSE
 # ──────────────────────────────────────────────
-_fleet_subscribers: list[asyncio.Queue] = []
-
-
-async def broadcast_fleet_event(event: dict):
-    dead = []
-    for q in _fleet_subscribers:
-        try:
-            q.put_nowait(event)
-        except asyncio.QueueFull:
-            dead.append(q)
-    for q in dead:
-        if q in _fleet_subscribers:
-            _fleet_subscribers.remove(q)
+import fleet_bus
 
 
 @app.get("/api/events")
@@ -401,8 +389,7 @@ async def fleet_events_stream(request: Request):
     user = getattr(request.state, "user", None)
     if not user:
         raise HTTPException(401, "Authentication required")
-    q: asyncio.Queue = asyncio.Queue(maxsize=100)
-    _fleet_subscribers.append(q)
+    q = fleet_bus.subscribe()
 
     async def event_stream():
         try:
@@ -414,8 +401,7 @@ async def fleet_events_stream(request: Request):
                 except asyncio.TimeoutError:
                     yield f"data: {json.dumps({'type': 'ping'})}\n\n"
         finally:
-            if q in _fleet_subscribers:
-                _fleet_subscribers.remove(q)
+            fleet_bus.unsubscribe(q)
 
     return StreamingResponse(
         event_stream(), media_type="text/event-stream",
@@ -1017,6 +1003,12 @@ async def dispatch(request: Request, mid: str, body: DispatchOptions | None = No
         dispatch_mission(session_id, mission, last_report, opts=body, github_token=_github_token)
     )
     running_tasks[session_id] = task
+    asyncio.create_task(fleet_bus.broadcast({
+        "type": "mission_dispatched",
+        "mission_id": mission["id"],
+        "mission_title": mission.get("title", ""),
+        "session_id": session_id,
+    }))
 
     return {"session_id": session_id, "status": "running", "model": model_used}
 

@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import Sidebar from './components/Sidebar';
+import FleetToast from './components/FleetToast';
 import Dashboard from './pages/Dashboard';
 import Projects from './pages/Projects';
 import MissionBoard from './pages/MissionBoard';
@@ -20,6 +21,14 @@ function AppInner() {
   const { user, loading } = useAuth();
   const [page, setPage] = useState('dashboard');
   const [selectedId, setSelectedId] = useState(null);
+  const [agentDelta, setAgentDelta] = useState(0);
+
+  const handleFleetEvent = useCallback((ev) => {
+    if (ev.type === 'mission_dispatched') setAgentDelta(d => d + 1);
+    if (ev.type === 'mission_completed' || ev.type === 'mission_failed' || ev.type === 'mission_cancelled') {
+      setAgentDelta(d => Math.max(0, d - 1));
+    }
+  }, []);
 
   const navigate = (pageName, id = null) => {
     setPage(pageName);
@@ -79,10 +88,11 @@ function AppInner() {
 
   return (
     <div className="app-layout">
-      <Sidebar activePage={page} navigate={navigate} />
+      <Sidebar activePage={page} navigate={navigate} agentDelta={agentDelta} />
       <main className="main-content">
         {renderPage()}
       </main>
+      <FleetToast onFleetEvent={handleFleetEvent} />
     </div>
   );
 }

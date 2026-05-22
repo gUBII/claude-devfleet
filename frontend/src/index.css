@@ -2232,3 +2232,8 @@ body {
   transition: border-color 150ms, color 150ms;
 }
 .sidebar-logout:hover { border-color: rgba(255,255,255,0.25); color: #aaa; }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}

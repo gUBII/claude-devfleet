@@ -54,6 +54,7 @@ _mp.parse_message = _patched_parse
 _cl.parse_message = _patched_parse
 
 import db
+import fleet_bus
 from prompt_template import build_prompt
 from worktree import create_worktree, cleanup_worktree
 from models import TOOL_PRESETS, LANE_DEFAULTS, MISSION_TYPE_TO_LANE, MODEL_CHOICES, DispatchOptions
@@ -727,6 +728,13 @@ async def _run_agent(
             "type": "done", "status": "completed", "exit_code": 0,
             "cost": total_cost, "tokens": total_tokens,
         })
+        asyncio.create_task(fleet_bus.broadcast({
+            "type": "mission_completed",
+            "mission_id": mission["id"],
+            "mission_title": mission.get("title", ""),
+            "session_id": session_id,
+            "cost": total_cost,
+        }))
         log.info("Session %s completed (cost $%.4f, tokens %d)", session_id, total_cost, total_tokens)
 
     except asyncio.CancelledError:
@@ -764,6 +772,14 @@ async def _run_agent(
             # Only delete worktree on regular cancel, NOT on takeover
             await cleanup_worktree(project_path, session_id, merge=False, branch_name=worktree_branch)
         _broadcast(session_id, {"type": "done", "status": new_status})
+        if not is_takeover:
+            asyncio.create_task(fleet_bus.broadcast({
+                "type": "mission_cancelled",
+                "mission_id": mission["id"],
+                "mission_title": mission.get("title", ""),
+                "session_id": session_id,
+                "reason": cancel_reason,
+            }))
 
     except Exception as e:
         watchdog_task.cancel()
@@ -832,6 +848,13 @@ async def _run_agent(
             await cleanup_worktree(project_path, session_id, merge=False, branch_name=worktree_branch)
         _broadcast(session_id, {"type": "done", "status": "failed", "error": str(e),
                                   "failure_layer": failure_layer})
+        asyncio.create_task(fleet_bus.broadcast({
+            "type": "mission_failed",
+            "mission_id": mission["id"],
+            "mission_title": mission.get("title", ""),
+            "session_id": session_id,
+            "failure_layer": failure_layer,
+        }))
 
     finally:
         running_tasks.pop(session_id, None)
