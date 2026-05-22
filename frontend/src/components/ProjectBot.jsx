@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { projectChat, getBotHistory, createMission } from '../api/client';
 import Moofasa from './Moofasa';
 import PlanActions from './PlanActions';
@@ -12,10 +14,17 @@ function parseMissionBlock(content) {
 function MessageContent({ msg, projectId, onCreateMission }) {
   const draft = parseMissionBlock(msg.content);
   const displayText = msg.content.replace(/```mission[\s\S]*?```/g, '').trim();
+  const isAssistant = msg.role === 'assistant';
   return (
     <>
       {displayText && (
-        <div style={{ whiteSpace: 'pre-wrap' }}>{displayText}</div>
+        isAssistant ? (
+          <div className="moofasa-markdown">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayText}</ReactMarkdown>
+          </div>
+        ) : (
+          <div style={{ whiteSpace: 'pre-wrap' }}>{displayText}</div>
+        )
       )}
       {draft && (
         <div className="moofasa-draft">
