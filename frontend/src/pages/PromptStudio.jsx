@@ -157,13 +157,23 @@ export default function PromptStudio({ navigate }) {
   const [error, setError] = useState(null);
   const critiquePollerRef = useRef(null);
 
-  // Load lane list on mount
+  // Load lane list on mount. If Fleet Config deep-linked here it left the
+  // target lane name in sessionStorage — preselect that lane instead of the
+  // first one in the list.
   useEffect(() => {
+    let deepLinkLane = null;
+    try {
+      deepLinkLane = sessionStorage.getItem('devfleet:prompt-studio:lane');
+      if (deepLinkLane) sessionStorage.removeItem('devfleet:prompt-studio:lane');
+    } catch { /* sessionStorage unavailable */ }
+
     listLanes()
       .then(data => {
         const list = Array.isArray(data) ? data : [];
         setLanes(list);
-        if (list.length > 0 && !selected) selectLane(list[0]);
+        if (list.length === 0 || selected) return;
+        const target = (deepLinkLane && list.find(l => l.name === deepLinkLane)) || list[0];
+        selectLane(target);
       })
       .catch(e => setError(e.message));
   }, []);

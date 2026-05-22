@@ -7,6 +7,10 @@
   --bg-hover: #27272a;
   --bg-input: #111114;
 
+  /* Aliases — kept distinct in case we want to tune later. */
+  --surface-card: var(--bg-elevated);
+  --surface-hover: var(--bg-hover);
+
   --text-primary: #fafafa;
   --text-secondary: #a1a1aa;
   --text-muted: #71717a;
@@ -1820,6 +1824,31 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+/* Deep-link callout that replaces the inline System Prompt textarea — points
+   the user at Prompt Studio for full structured authoring. */
+.lane-editor-prompt-link {
+  margin-top: 8px;
+  padding: 14px 16px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.lane-editor-prompt-link__title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+.lane-editor-prompt-link__hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.4;
 }
 
 .field-col label {

@@ -7,11 +7,12 @@ const MODELS = [
   'claude-haiku-4-5-20251001',
 ];
 
-function LaneEditor({ lane, onSave, onClose }) {
+function LaneEditor({ lane, onSave, onClose, navigate }) {
+  // Capacity / model / enabled only. Prompt authoring lives in Prompt Studio —
+  // a single source of truth avoids divergent edits across two surfaces.
   const [form, setForm] = useState({
     max_agents: lane.max_agents ?? 1,
     default_model: lane.default_model ?? 'claude-sonnet-4-6',
-    append_prompt: lane.append_prompt ?? '',
     enabled: lane.enabled ?? true,
   });
   const [saving, setSaving] = useState(false);
@@ -28,6 +29,16 @@ function LaneEditor({ lane, onSave, onClose }) {
     } finally {
       setSaving(false);
     }
+  };
+
+  const goToPromptStudio = () => {
+    // Pass the lane via sessionStorage so PromptStudio can preselect it on mount.
+    // Keeps the App.jsx navigate API (pageName, id) untouched.
+    try {
+      sessionStorage.setItem('devfleet:prompt-studio:lane', lane.name);
+    } catch { /* sessionStorage may be unavailable in some embedded contexts */ }
+    onClose();
+    if (navigate) navigate('prompt-studio');
   };
 
   return (
@@ -74,16 +85,16 @@ function LaneEditor({ lane, onSave, onClose }) {
             </label>
           </div>
 
-          <div className="field-col">
-            <label>System Prompt (appended to every agent in this lane)</label>
-            <textarea
-              className="prompt-editor-large"
-              value={form.append_prompt}
-              onChange={e => setForm(f => ({ ...f, append_prompt: e.target.value }))}
-              spellCheck={false}
-              placeholder={`Describe how ${lane.name} agents should behave...`}
-            />
-            <span className="char-count">{form.append_prompt.length} chars</span>
+          <div className="lane-editor-prompt-link">
+            <div>
+              <div className="lane-editor-prompt-link__title">System prompt + MCP tools</div>
+              <div className="lane-editor-prompt-link__hint">
+                Authored in Prompt Studio — structured rules, quality gates, tool allowlist, Opus critique.
+              </div>
+            </div>
+            <button className="btn btn-secondary" onClick={goToPromptStudio}>
+              Edit full prompt →
+            </button>
           </div>
 
           {error && <div className="editor-error">{error}</div>}
@@ -144,7 +155,7 @@ function CeilingPicker({ ceiling, onChange }) {
   );
 }
 
-export default function FleetConfig() {
+export default function FleetConfig({ navigate }) {
   const [lanes, setLanes] = useState([]);
   const [ceiling, setCeiling] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -182,7 +193,7 @@ export default function FleetConfig() {
       <div className="fleet-config-header">
         <div>
           <h1>Fleet Configuration</h1>
-          <p className="subtitle">{lanes.length} lanes · {totalSlots} total slots · click any lane to edit its prompt and capacity</p>
+          <p className="subtitle">{lanes.length} lanes · {totalSlots} total slots · click any lane to edit capacity &amp; model (prompt lives in Prompt Studio)</p>
         </div>
       </div>
 
@@ -208,12 +219,8 @@ export default function FleetConfig() {
                 <span className="slot-max">{lane.max_agents}</span>
               </div>
             </div>
-            <div className="lane-prompt-preview">
-              {lane.append_prompt
-                ? lane.append_prompt.slice(0, 120) + (lane.append_prompt.length > 120 ? '…' : '')
-                : <span className="no-prompt">No custom prompt — click to add</span>
-              }
-            </div>
+            {/* Prompt preview removed — Prompt Studio is the authoring surface.
+                Card now stays focused on capacity + status. */}
             <div className="lane-card-footer">
               <span className={`lane-status-dot ${lane.enabled ? 'active' : 'inactive'}`} />
               <span>{lane.enabled ? 'active' : 'disabled'}</span>
@@ -228,6 +235,7 @@ export default function FleetConfig() {
           lane={editing}
           onSave={handleSaved}
           onClose={() => setEditing(null)}
+          navigate={navigate}
         />
       )}
     </div>
