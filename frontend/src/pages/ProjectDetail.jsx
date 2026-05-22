@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { getProject, listMissions } from '../api/client';
 import MissionCard from '../components/MissionCard';
 import StatusBadge from '../components/StatusBadge';
+import ProjectBot from '../components/ProjectBot';
+import Moofasa from '../components/Moofasa';
 
 function timeAgo(dateStr) {
   if (!dateStr) return '';
@@ -25,6 +27,7 @@ export default function ProjectDetail({ id, navigate }) {
   const [project, setProject] = useState(null);
   const [missions, setMissions] = useState([]);
   const [activeTab, setActiveTab] = useState('all');
+  const [showBot, setShowBot] = useState(false);
   const [error, setError] = useState(null);
 
   const load = async () => {
@@ -54,7 +57,8 @@ export default function ProjectDetail({ id, navigate }) {
   missions.forEach(m => { counts[m.status] = (counts[m.status] || 0) + 1; });
 
   return (
-    <div>
+    <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start' }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
       <button className="back-btn" onClick={() => navigate('projects')}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M19 12H5M12 19l-7-7 7-7" />
@@ -66,9 +70,20 @@ export default function ProjectDetail({ id, navigate }) {
       <div style={{ marginBottom: 28 }}>
         <div className="flex justify-between items-center" style={{ marginBottom: 8 }}>
           <h2 style={{ fontSize: 24, fontWeight: 700, letterSpacing: '-0.02em' }}>{project.name}</h2>
-          <button className="btn btn-primary" onClick={() => navigate('missions')}>
-            New Mission
-          </button>
+          <div className="flex gap-8">
+            <button
+              className={`btn${showBot ? ' btn-primary' : ''}`}
+              onClick={() => setShowBot(v => !v)}
+              title="Toggle Moofasa — your project assistant"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+            >
+              <Moofasa size={14} className="moofasa-hover" />
+              <span>Moofasa</span>
+            </button>
+            <button className="btn btn-primary" onClick={() => navigate('missions')}>
+              New Mission
+            </button>
+          </div>
         </div>
         <div className="text-sm font-mono text-muted" style={{ marginBottom: 6 }}>{project.path}</div>
         {project.description && <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>{project.description}</p>}
@@ -121,6 +136,15 @@ export default function ProjectDetail({ id, navigate }) {
             <MissionCard key={m.id} mission={m} onClick={() => navigate('mission', m.id)} />
           ))}
         </div>
+      )}
+      </div>{/* end flex-1 content column */}
+
+      {showBot && project && (
+        <ProjectBot
+          projectId={id}
+          projectName={project.name}
+          onClose={() => setShowBot(false)}
+        />
       )}
     </div>
   );

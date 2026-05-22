@@ -261,6 +261,67 @@ export const getMe = () => request('/auth/me');
 export const createInvite = () => request('/auth/invite', { method: 'POST' });
 export const listUsers = () => request('/auth/users');
 
+// ── HITL ─────────────────────────────────────────────────────────────────────
+export const hitlReply = (sessionId, reply) =>
+  request(`/sessions/${sessionId}/hitl-reply`, { method: 'POST', body: JSON.stringify({ reply }) });
+
+// ── Project Bot (Moofasa) ─────────────────────────────────────────────────────
+export const getBotHistory = (projectId) => request(`/projects/${projectId}/bot-history`);
+
+export function projectChat(projectId, message, { planner_mode = false, onText, onDone, onError, onPlanMeta } = {}) {
+  const token = localStorage.getItem('devfleet_token') || '';
+  fetch(`${API}/projects/${projectId}/chat`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ message, planner_mode }),
+  }).then(async (res) => {
+    if (!res.ok) { onError?.('Chat request failed'); return; }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const data = JSON.parse(line.slice(6));
+          if (data.type === 'text') onText?.(data.text);
+          else if (data.type === 'plan_meta') onPlanMeta?.(data);
+          else if (data.type === 'done') onDone?.();
+          else if (data.type === 'error') onError?.(data.text);
+        } catch {}
+      }
+    }
+  }).catch((err) => onError?.(String(err)));
+}
+
+export async function downloadPlan(projectId, planId, title) {
+  const plan = await request(`/projects/${projectId}/plans/${planId}`);
+  const blob = new Blob([plan.content || ''], { type: 'text/markdown;charset=utf-8' });
+  const safeTitle = (title || plan.plan_title || 'plan').replace(/[^\w\-]+/g, '-').toLowerCase();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${safeTitle}-${new Date().toISOString().slice(0, 10)}.md`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+export function openPlanPrint(projectId, planId) {
+  const token = localStorage.getItem('devfleet_token') || '';
+  // Pass token as query param since window.open can't send Authorization headers.
+  const url = `${API}/projects/${projectId}/plans/${planId}/print?token=${encodeURIComponent(token)}`;
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
 // ── Global Fleet Events SSE ───────────────────────────────────────────────────
 export function streamFleetEvents({ onEvent, onError }) {
   const token = localStorage.getItem('devfleet_token') || '';

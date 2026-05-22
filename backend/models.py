@@ -463,3 +463,17 @@ class TokenResponse(BaseModel):
 class CeilingUpdate(BaseModel):
     """Global agent concurrency ceiling update."""
     max_agents: int
+
+
+# ── HITL + Project Bot ───────────────────────────────────────────────────────
+
+class HitlAskRequest(BaseModel):
+    question: str
+    options: list[str] = []
+
+class HitlReply(BaseModel):
+    reply: str
+
+class ProjectChatRequest(BaseModel):
+    message: str
+    planner_mode: bool = False

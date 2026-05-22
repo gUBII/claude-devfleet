@@ -201,6 +201,27 @@ CREATE TABLE IF NOT EXISTS invite_tokens (
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+CREATE TABLE IF NOT EXISTS hitl_questions (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    question TEXT NOT NULL,
+    options TEXT DEFAULT '[]',
+    reply TEXT,
+    asked_at TEXT DEFAULT (datetime('now')),
+    answered_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS project_bot_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_bot_history_project
+    ON project_bot_history(project_id, created_at DESC);
 """
 
 
@@ -249,6 +270,13 @@ async def init_db():
             # v9: per-user mission attribution
             "ALTER TABLE missions ADD COLUMN created_by_email TEXT DEFAULT ''",
             "ALTER TABLE missions ADD COLUMN created_by_name TEXT DEFAULT ''",
+            # v10: HITL + project bot
+            "CREATE TABLE IF NOT EXISTS hitl_questions (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, question TEXT NOT NULL, options TEXT DEFAULT '[]', reply TEXT, asked_at TEXT DEFAULT (datetime('now')), answered_at TEXT)",
+            "CREATE TABLE IF NOT EXISTS project_bot_history (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')))",
+            "CREATE INDEX IF NOT EXISTS idx_bot_history_project ON project_bot_history(project_id, created_at DESC)",
+            # v11: Moofasa planner mode — mark which assistant rows are plans for context compaction
+            "ALTER TABLE project_bot_history ADD COLUMN is_plan INTEGER DEFAULT 0",
+            "ALTER TABLE project_bot_history ADD COLUMN plan_title TEXT DEFAULT ''",
         ]
         for migration in migrations:
             try:
@@ -327,6 +355,7 @@ async def init_db():
             ("devfleet-tools", "request_review", "after completing implementation"),
             ("devfleet-tools", "get_sub_mission_status", "when waiting on sub-missions"),
             ("devfleet-tools", "list_project_missions", "when checking project context"),
+            ("devfleet-tools", "ask_human", "only when genuinely blocked and need a human decision"),
         ]
         for _lane_name in _LD:
             for _server, _tool, _hint in _DEVFLEET_TOOLS:

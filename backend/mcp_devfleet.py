@@ -163,6 +163,31 @@ async def list_tools() -> list[types.Tool]:
                 },
             },
         ),
+        types.Tool(
+            name="ask_human",
+            description=(
+                "Pause this mission and ask the human operator a question. "
+                "Call this ONLY when you are genuinely blocked and need a human decision before proceeding — "
+                "e.g. ambiguous requirements, missing credentials, conflicting instructions. "
+                "Do NOT call this for routine choices you can make yourself. "
+                "The mission will pause until the human replies (up to 10 minutes)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The specific question to ask. Be concise and precise.",
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of suggested answers shown as clickable buttons. Leave empty for free-text only.",
+                    },
+                },
+                "required": ["question"],
+            },
+        ),
     ]
 
 
@@ -178,6 +203,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         return await _get_sub_mission_status(arguments)
     elif name == "list_project_missions":
         return await _list_project_missions(arguments)
+    elif name == "ask_human":
+        return await _ask_human(arguments)
     else:
         return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -342,6 +369,27 @@ async def _list_project_missions(args: dict) -> list[types.TextContent]:
         for m in data[:20]
     ]
     return [types.TextContent(type="text", text=json.dumps(missions, indent=2))]
+
+
+async def _ask_human(args: dict) -> list[types.TextContent]:
+    """Block until the human operator replies via the DevFleet UI (up to 10 min)."""
+    if not SESSION_ID:
+        return [types.TextContent(type="text", text="Cannot ask human: no session context. Proceed with best judgment.")]
+
+    question = args.get("question", "")
+    options = args.get("options", [])
+    try:
+        async with httpx.AsyncClient(timeout=620) as client:
+            resp = await client.post(
+                f"{DEVFLEET_API}/api/internal/sessions/{SESSION_ID}/hitl-ask",
+                json={"question": question, "options": options},
+            )
+            if resp.status_code == 200:
+                reply = resp.json().get("reply", "")
+                return [types.TextContent(type="text", text=f"Human replied: {reply}")]
+            return [types.TextContent(type="text", text=f"HITL endpoint returned {resp.status_code}. Proceed with best judgment.")]
+    except Exception:
+        return [types.TextContent(type="text", text="No reply received (timeout or connection error). Proceed with best judgment.")]
 
 
 async def main():

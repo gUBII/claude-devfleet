@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { getSession, streamSession, cancelSession, takeoverSession, startMissionRemoteControl, streamRemoteSession, listRemoteControlSessions } from '../api/client';
+import { getSession, streamSession, cancelSession, takeoverSession, startMissionRemoteControl, streamRemoteSession, listRemoteControlSessions, hitlReply } from '../api/client';
 import LiveOutput from '../components/LiveOutput';
 import ReportView from '../components/ReportView';
 import RemoteControlModal from '../components/RemoteControlModal';
@@ -20,6 +20,9 @@ export default function LiveAgent({ sessionId, navigate }) {
   const [remoteOutput, setRemoteOutput] = useState('');
   const [remoteConnected, setRemoteConnected] = useState(false);
   const [remoteSessionId, setRemoteSessionId] = useState(null);
+  const [hitlQuestion, setHitlQuestion] = useState(null);
+  const [hitlReplyText, setHitlReplyText] = useState('');
+  const [hitlSending, setHitlSending] = useState(false);
   const cleanupRef = useRef(null);
   const remoteCleanupRef = useRef(null);
   const remoteTermRef = useRef(null);
@@ -60,6 +63,17 @@ export default function LiveAgent({ sessionId, navigate }) {
             if (evt.type === 'cost_update') {
               if (evt.cost > 0) setFinalCost(evt.cost);
               if (evt.tokens > 0) setFinalTokens(evt.tokens);
+              return;
+            }
+            if (evt.type === 'hitl_question') {
+              setHitlQuestion({ question: evt.question, options: evt.options || [], id: evt.question_id });
+              setStatus('waiting');
+              return;
+            }
+            if (evt.type === 'hitl_answered') {
+              setHitlQuestion(null);
+              setHitlReplyText('');
+              setStatus('running');
               return;
             }
             setEvents(prev => [...prev, evt]);
@@ -160,6 +174,22 @@ export default function LiveAgent({ sessionId, navigate }) {
         setRemoteConnected(false);
       },
     });
+  };
+
+  const handleHitlSend = async (reply) => {
+    const text = reply || hitlReplyText.trim();
+    if (!text) return;
+    setHitlSending(true);
+    try {
+      await hitlReply(sessionId, text);
+      setHitlReplyText('');
+      setHitlQuestion(null);
+      setStatus('running');
+    } catch (e) {
+      setError(e.message || 'Failed to send reply');
+    } finally {
+      setHitlSending(false);
+    }
   };
 
   const formatTime = (s) => {
@@ -289,6 +319,62 @@ export default function LiveAgent({ sessionId, navigate }) {
       )}
 
       <LiveOutput events={events} status={status} />
+
+      {hitlQuestion && (
+        <div style={{
+          margin: '12px 0', padding: '16px 20px',
+          background: 'rgba(255,190,0,0.06)',
+          border: '1px solid rgba(255,190,0,0.25)',
+          borderRadius: 10,
+        }}>
+          <div style={{ color: '#f1c40f', fontWeight: 600, fontSize: 13, marginBottom: 10 }}>
+            ⏸ Agent is waiting — needs your input:
+          </div>
+          <div style={{ color: '#e6edf3', marginBottom: 14, fontSize: 14, lineHeight: 1.5 }}>
+            {hitlQuestion.question}
+          </div>
+          {hitlQuestion.options.length > 0 && (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+              {hitlQuestion.options.map((opt, i) => (
+                <button
+                  key={i}
+                  onClick={() => handleHitlSend(opt)}
+                  disabled={hitlSending}
+                  style={{
+                    background: 'rgba(88,166,255,0.1)', border: '1px solid rgba(88,166,255,0.3)',
+                    color: '#58a6ff', borderRadius: 6, padding: '6px 14px', fontSize: 13,
+                    cursor: 'pointer', fontFamily: 'inherit',
+                  }}
+                >
+                  {i + 1}. {opt}
+                </button>
+              ))}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              type="text"
+              value={hitlReplyText}
+              onChange={e => setHitlReplyText(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleHitlSend()}
+              placeholder="Or type a custom answer..."
+              disabled={hitlSending}
+              style={{
+                flex: 1, background: '#0d1117', border: '1px solid #1e2a3a',
+                color: '#e6edf3', borderRadius: 6, padding: '8px 12px', fontSize: 13,
+                outline: 'none', fontFamily: 'inherit',
+              }}
+            />
+            <button
+              className="btn btn-primary"
+              onClick={() => handleHitlSend()}
+              disabled={hitlSending || !hitlReplyText.trim()}
+            >
+              {hitlSending ? 'Sending…' : 'Send'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {report && (
         <div className="section" style={{ marginTop: 24 }}>

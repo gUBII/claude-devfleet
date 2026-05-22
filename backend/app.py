@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from pydantic import BaseModel
@@ -17,7 +17,8 @@ import db
 from models import (ProjectCreate, ProjectUpdate, MissionCreate, MissionUpdate,
                     DispatchOptions, TOOL_PRESETS, MODEL_CHOICES,
                     ServiceCreate, ServiceUpdate, IncidentCreate, IncidentUpdate,
-                    McpServerCreate, CeilingUpdate)
+                    McpServerCreate, CeilingUpdate,
+                    HitlAskRequest, HitlReply, ProjectChatRequest)
 import health_checker
 import mission_watcher
 import scheduler
@@ -410,6 +411,244 @@ async def fleet_events_stream(request: Request):
 
 
 # ──────────────────────────────────────────────
+# HITL — Human-in-the-Loop
+# ──────────────────────────────────────────────
+import hitl as hitl_state
+
+
+@app.post("/api/internal/sessions/{sid}/hitl-ask")
+async def hitl_ask(sid: str, body: HitlAskRequest, request: Request):
+    # Only allow calls from localhost — MCP subprocess lives on 127.0.0.1
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(403, "Internal endpoint — localhost only")
+
+    qid = str(uuid.uuid4())
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            "INSERT INTO hitl_questions (id, session_id, question, options) VALUES (?, ?, ?, ?)",
+            (qid, sid, body.question, json.dumps(body.options)),
+        )
+        await conn.execute(
+            "UPDATE agent_sessions SET status='waiting_for_human' WHERE id=? AND status='running'",
+            (sid,),
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+    from sdk_engine import _broadcast
+    _broadcast(sid, {
+        "type": "hitl_question",
+        "question_id": qid,
+        "question": body.question,
+        "options": body.options,
+    })
+    await fleet_bus.broadcast({
+        "type": "hitl_question",
+        "session_id": sid,
+        "question": body.question,
+    })
+
+    fut = hitl_state.create(sid)
+    try:
+        reply = await asyncio.wait_for(fut, timeout=hitl_state.HITL_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        hitl_state.cancel(sid)
+        conn = await db.get_db()
+        try:
+            await conn.execute("UPDATE agent_sessions SET status='running' WHERE id=?", (sid,))
+            await conn.commit()
+        finally:
+            await conn.close()
+        return {"reply": "No reply received within 10 minutes. Proceed with best judgment."}
+
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            "UPDATE hitl_questions SET reply=?, answered_at=datetime('now') WHERE id=?",
+            (reply, qid),
+        )
+        await conn.execute("UPDATE agent_sessions SET status='running' WHERE id=?", (sid,))
+        await conn.commit()
+    finally:
+        await conn.close()
+
+    _broadcast(sid, {"type": "hitl_answered", "reply": reply})
+    return {"reply": reply}
+
+
+@app.post("/api/sessions/{sid}/hitl-reply")
+async def hitl_reply(sid: str, body: HitlReply, request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    if not hitl_state.is_waiting(sid):
+        raise HTTPException(400, "Session is not waiting for input")
+    resolved = hitl_state.resolve(sid, body.reply)
+    if not resolved:
+        raise HTTPException(400, "Could not deliver reply")
+    return {"ok": True}
+
+
+@app.post("/api/projects/{pid}/chat")
+async def project_chat(pid: str, body: ProjectChatRequest, request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall("SELECT * FROM projects WHERE id=?", (pid,))
+        if not rows:
+            raise HTTPException(404, "Project not found")
+        project = dict(rows[0])
+        await conn.execute(
+            "INSERT INTO project_bot_history (project_id, role, content) VALUES (?, 'user', ?)",
+            (pid, body.message),
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+    from project_bot import stream_bot_response
+    return StreamingResponse(
+        stream_bot_response(pid, project, body.message, user, planner_mode=body.planner_mode),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-store, no-transform", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/projects/{pid}/bot-history")
+async def get_bot_history(pid: str, request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT id, role, content, created_at, is_plan, plan_title FROM project_bot_history WHERE project_id=? ORDER BY created_at ASC LIMIT 100",
+            (pid,),
+        )
+        return [dict(r) for r in rows]
+    finally:
+        await conn.close()
+
+
+@app.get("/api/projects/{pid}/plans/{hid}")
+async def get_plan(pid: str, hid: int, request: Request):
+    """Fetch a saved plan markdown row for download."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT id, content, plan_title, created_at FROM project_bot_history WHERE id=? AND project_id=? AND is_plan=1",
+            (hid, pid),
+        )
+        if not rows:
+            raise HTTPException(404, "Plan not found")
+        return dict(rows[0])
+    finally:
+        await conn.close()
+
+
+@app.get("/api/projects/{pid}/plans/{hid}/print", response_class=HTMLResponse)
+async def print_plan(pid: str, hid: int, request: Request, token: str | None = None):
+    """Print-styled HTML rendering of a plan. Designed for ⌘P → Save as PDF.
+
+    Accepts ?token=<jwt> query param so window.open from the client can authenticate
+    without passing the Authorization header (browsers don't allow that on window.open).
+    """
+    import auth
+    user = getattr(request.state, "user", None)
+    if not user and token:
+        try:
+            user = auth.decode_token(token)
+        except Exception:
+            user = None
+    if not user:
+        raise HTTPException(401, "Authentication required")
+
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT b.content, b.plan_title, b.created_at, p.name AS project_name "
+            "FROM project_bot_history b JOIN projects p ON p.id=b.project_id "
+            "WHERE b.id=? AND b.project_id=? AND b.is_plan=1",
+            (hid, pid),
+        )
+        if not rows:
+            raise HTTPException(404, "Plan not found")
+        plan = dict(rows[0])
+    finally:
+        await conn.close()
+
+    import markdown as md
+    body_html = md.markdown(
+        plan["content"] or "",
+        output_format="html",
+        extensions=["fenced_code", "tables", "toc"],
+    )
+    title = plan.get("plan_title") or "Untitled Plan"
+    project_name = plan.get("project_name") or ""
+    created = plan.get("created_at") or ""
+
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{title} — Moofasa</title>
+<style>
+  :root {{
+    --ink: #1a1a1a; --muted: #5b6573; --rule: #e5e7eb; --accent: #2c3e8a;
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    font: 11pt/1.55 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+    color: var(--ink); max-width: 760px; margin: 48px auto; padding: 0 24px;
+    background: #fff;
+  }}
+  header {{ border-bottom: 2px solid var(--accent); padding-bottom: 16px; margin-bottom: 32px; }}
+  .eyebrow {{ font-size: 10.5pt; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }}
+  h1 {{ font-size: 22pt; margin: 6px 0 0; letter-spacing: -0.01em; }}
+  .meta {{ font-size: 10pt; color: var(--muted); margin-top: 10px; }}
+  h2 {{ font-size: 14pt; margin-top: 28px; padding-bottom: 4px; border-bottom: 1px solid var(--rule); }}
+  h3 {{ font-size: 12pt; margin-top: 20px; }}
+  p, li {{ font-size: 11pt; }}
+  code {{ background: #f3f4f6; padding: 1px 4px; border-radius: 3px; font: 10pt "SF Mono", Menlo, monospace; }}
+  pre {{ background: #f8f9fa; border: 1px solid var(--rule); border-radius: 6px; padding: 12px; overflow-x: auto; }}
+  pre code {{ background: transparent; padding: 0; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 12px 0; }}
+  th, td {{ border: 1px solid var(--rule); padding: 6px 10px; text-align: left; font-size: 10pt; }}
+  th {{ background: #f8f9fa; }}
+  blockquote {{ border-left: 3px solid var(--accent); margin: 12px 0; padding: 4px 14px; color: var(--muted); }}
+  footer {{ margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--rule); font-size: 9pt; color: var(--muted); }}
+  @media print {{
+    body {{ margin: 0; padding: 24px; }}
+    h2, h3 {{ break-after: avoid; }}
+    pre, blockquote, table {{ break-inside: avoid; }}
+  }}
+</style>
+</head>
+<body>
+<header>
+  <div class="eyebrow">Moofasa · DevFleet plan</div>
+  <h1>{title}</h1>
+  <div class="meta">Project: {project_name} &nbsp;·&nbsp; Generated {created}</div>
+</header>
+<main>
+{body_html}
+</main>
+<footer>Generated by Moofasa, Nexis365 DevFleet assistant. Press ⌘P to save as PDF.</footer>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+
+# ──────────────────────────────────────────────
 # Projects
 # ──────────────────────────────────────────────
 
@@ -579,15 +818,15 @@ async def create_mission(request: Request, body: MissionCreate):
             """INSERT INTO missions (id, project_id, title, detailed_prompt, acceptance_criteria,
                priority, tags, model, max_turns, max_budget_usd, allowed_tools, mission_type,
                lane, parent_mission_id, depends_on, auto_dispatch, schedule_cron, schedule_enabled,
-               mission_number, created_by_email, created_by_name)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               mission_number, created_by_email, created_by_name, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (mid, body.project_id, body.title, body.detailed_prompt,
              body.acceptance_criteria, body.priority, json.dumps(body.tags),
              body.model, body.max_turns, body.max_budget_usd,
              body.allowed_tools or "", body.mission_type, lane,
              body.parent_mission_id, json.dumps(body.depends_on),
              1 if body.auto_dispatch else 0, body.schedule_cron, schedule_enabled,
-             next_num, _by_email, _by_name),
+             next_num, _by_email, _by_name, body.status or "pending"),
         )
         await conn.commit()
         row = await conn.execute_fetchall(
