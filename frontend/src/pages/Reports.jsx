@@ -20,12 +20,14 @@ function timeAgo(dateStr) {
 
 export default function Reports({ navigate }) {
   const [reports, setReports] = useState([]);
+  const [totalCount, setTotalCount] = useState(0);
   const [projects, setProjects] = useState([]);
   const [filterProject, setFilterProject] = useState('');
   const [expandedId, setExpandedId] = useState(null);
 
   useEffect(() => {
     listProjects().then(setProjects).catch(() => {});
+    listReports({}).then(r => setTotalCount(r.length)).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -39,7 +41,7 @@ export default function Reports({ navigate }) {
       <div className="page-header">
         <div>
           <h2>Reports</h2>
-          <p>{reports.length} agent reports</p>
+          <p>{totalCount} agent reports</p>
         </div>
         <select className="form-select" value={filterProject} onChange={e => setFilterProject(e.target.value)} style={{ minWidth: 140 }}>
           <option value="">All Projects</option>
