@@ -22,7 +22,6 @@ export default function Sidebar({ activePage, navigate, agentDelta = 0 }) {
       try {
         const stats = await getDashboardStats();
         setRunningAgents(stats.running_agents || 0);
-        prevDelta.current = agentDelta;
       } catch {}
     };
     poll();
