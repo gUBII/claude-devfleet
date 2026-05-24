@@ -18,7 +18,8 @@ from models import (ProjectCreate, ProjectUpdate, MissionCreate, MissionUpdate,
                     DispatchOptions, TOOL_PRESETS, MODEL_CHOICES,
                     ServiceCreate, ServiceUpdate, IncidentCreate, IncidentUpdate,
                     McpServerCreate, CeilingUpdate,
-                    HitlAskRequest, HitlReply, ProjectChatRequest)
+                    HitlAskRequest, HitlReply, ProjectChatRequest,
+                    GitHubTokenSet, UserPermissionGrant, CHAT_PERMISSIONS)
 import health_checker
 import mission_watcher
 import scheduler
@@ -309,6 +310,19 @@ def _check_mcp_request(request) -> tuple[bool, str]:
     origin = request.headers.get("origin")
     if origin and origin not in _MCP_ORIGIN_ALLOWLIST:
         return False, f"Origin {origin!r} not in allowlist"
+    # Trust loopback ONLY when there's no proxy header. Cloudflared proxies
+    # tunnel traffic to localhost:18801, so request.client.host is 127.0.0.1
+    # for both the local Claude CLI AND external tunnel callers. The
+    # CF-Connecting-IP / X-Forwarded-For header is the "came from outside"
+    # signal — never trust loopback when either is present.
+    client_host = request.client.host if request.client else ""
+    is_loopback = client_host in ("127.0.0.1", "::1", "localhost")
+    has_proxy_header = bool(
+        request.headers.get("cf-connecting-ip")
+        or request.headers.get("x-forwarded-for")
+    )
+    if is_loopback and not has_proxy_header:
+        return True, ""
     # Header-token auth — only enforced when DEVFLEET_MCP_KEY is set in env.
     # Empty/unset = dev mode (matches the prior implicit behavior).
     if _MCP_API_KEY:
@@ -350,13 +364,16 @@ class _McpHttpEndpoint:
         await transport.handle_request(scope, receive, send)
 
 
-app.mount("/mcp", Mount(path="", routes=[
-    # Streamable HTTP — single endpoint for GET/POST/DELETE
-    Route("/", endpoint=_McpHttpEndpoint(), methods=["GET", "POST", "DELETE"]),
-    # SSE (legacy) — backward-compatible endpoints
-    Route("/sse", endpoint=_McpSseEndpoint()),
-    Route("/messages/", endpoint=_McpPostEndpoint(), methods=["POST"]),
-]))
+_mcp_http_endpoint = _McpHttpEndpoint()
+# Streamable HTTP — single endpoint for GET/POST/DELETE. Register at both
+# `/mcp` and `/mcp/` because clients (Claude CLI especially) do not follow
+# the implicit trailing-slash redirect, and Starlette returns 405 for the
+# missing-slash variant instead of 307.
+app.add_route("/mcp", _mcp_http_endpoint, methods=["GET", "POST", "DELETE"])
+app.add_route("/mcp/", _mcp_http_endpoint, methods=["GET", "POST", "DELETE"])
+# SSE (legacy) — backward-compatible endpoints. Kept until DEVFLEET_SSE_REMOVAL_DATE.
+app.add_route("/mcp/sse", _McpSseEndpoint())
+app.add_route("/mcp/messages/", _McpPostEndpoint(), methods=["POST"])
 
 
 # ──────────────────────────────────────────────
@@ -604,6 +621,8 @@ async def project_chat(pid: str, body: ProjectChatRequest, request: Request):
     if not user:
         raise HTTPException(401, "Authentication required")
 
+    user_id = user.get("sub") or user.get("id") or ""
+
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall("SELECT * FROM projects WHERE id=?", (pid,))
@@ -611,8 +630,10 @@ async def project_chat(pid: str, body: ProjectChatRequest, request: Request):
             raise HTTPException(404, "Project not found")
         project = dict(rows[0])
         await conn.execute(
-            "INSERT INTO project_bot_history (project_id, role, content) VALUES (?, 'user', ?)",
-            (pid, body.message),
+            "INSERT INTO project_bot_history "
+            "(project_id, role, content, user_id, persona) "
+            "VALUES (?, 'user', ?, ?, 'user')",
+            (pid, body.message, user_id),
         )
         await conn.commit()
     finally:
@@ -620,7 +641,14 @@ async def project_chat(pid: str, body: ProjectChatRequest, request: Request):
 
     from project_bot import stream_bot_response
     return StreamingResponse(
-        stream_bot_response(pid, project, body.message, user, planner_mode=body.planner_mode),
+        stream_bot_response(
+            pid,
+            project,
+            body.message,
+            user,
+            planner_mode=body.planner_mode,
+            force_persona=body.force_persona,
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache, no-store, no-transform", "X-Accel-Buffering": "no"},
     )
@@ -755,6 +783,134 @@ async def print_plan(pid: str, hid: int, request: Request, token: str | None = N
 
 
 # ──────────────────────────────────────────────
+# Persona chat — GH token mgmt, RBAC admin, audit + summaries
+# ──────────────────────────────────────────────
+
+
+@app.put("/api/auth/me/github-token")
+async def set_my_github_token(body: GitHubTokenSet, request: Request):
+    """Store the caller's GitHub PAT, encrypted at rest. Replaces any
+    previous token."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    import auth
+    await auth.set_github_token(user["sub"], body.token, body.github_username or "")
+    return {"ok": True, "github_username": body.github_username or ""}
+
+
+@app.delete("/api/auth/me/github-token", status_code=204)
+async def clear_my_github_token(request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    import auth
+    await auth.clear_github_token(user["sub"])
+    return None
+
+
+@app.get("/api/auth/me/github-token")
+async def get_my_github_token_status(request: Request):
+    """Return whether the caller has a token set + their stored username.
+    Never returns the token itself."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    import auth
+    row = await auth.get_github_token(user["sub"])
+    if not row:
+        return {"is_set": False, "github_username": ""}
+    _token, username = row
+    return {"is_set": True, "github_username": username}
+
+
+@app.get("/api/admin/users/{uid}/permissions")
+async def admin_list_user_permissions(uid: str, request: Request):
+    user = getattr(request.state, "user", None)
+    if not user or user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    import auth
+    perms = await auth.list_permissions(uid)
+    return {"user_id": uid, "permissions": perms, "available": CHAT_PERMISSIONS}
+
+
+@app.put("/api/admin/users/{uid}/permissions")
+async def admin_grant_user_permission(
+    uid: str, body: UserPermissionGrant, request: Request
+):
+    user = getattr(request.state, "user", None)
+    if not user or user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    if not body.matches_known():
+        raise HTTPException(
+            400, f"Unknown permission. Allowed: {CHAT_PERMISSIONS}"
+        )
+    import auth
+    await auth.grant_permission(uid, body.permission, user["sub"])
+    return {"ok": True, "user_id": uid, "permission": body.permission}
+
+
+@app.delete("/api/admin/users/{uid}/permissions/{perm}", status_code=204)
+async def admin_revoke_user_permission(uid: str, perm: str, request: Request):
+    user = getattr(request.state, "user", None)
+    if not user or user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    import auth
+    await auth.revoke_permission(uid, perm)
+    return None
+
+
+@app.get("/api/projects/{pid}/chat/actions")
+async def list_project_chat_actions(
+    pid: str, request: Request, limit: int = Query(100, ge=1, le=500)
+):
+    """Return the most-recent chat_actions audit rows for a project."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    import chat_audit
+    rows = await chat_audit.list_actions_for_project(pid, limit=limit)
+    return rows
+
+
+@app.get("/api/projects/{pid}/chat/summaries")
+async def list_project_chat_summaries(pid: str, request: Request):
+    """Return saved daily chat summaries (most recent first)."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT id, project_id, summary_date, summary, message_count, "
+            "action_count, created_at FROM chat_summaries "
+            "WHERE project_id=? ORDER BY summary_date DESC LIMIT 90",
+            (pid,),
+        )
+        return [dict(r) for r in rows]
+    finally:
+        await conn.close()
+
+
+@app.post("/api/projects/{pid}/chat/compact")
+async def compact_project_chat_now(pid: str, request: Request):
+    """Admin or chat.compact-permitted user can manually trigger compaction
+    for the previous day. Idempotent — running twice for the same date is a
+    no-op."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    import auth
+    if user.get("role") != "admin" and not await auth.has_permission(
+        user["sub"], "chat.compact"
+    ):
+        raise HTTPException(403, "Permission denied: requires chat.compact")
+    import chat_compactor
+    result = await chat_compactor.compact_yesterday(pid)
+    return result
+
+
+# ──────────────────────────────────────────────
 # Projects
 # ──────────────────────────────────────────────
 
@@ -805,8 +961,12 @@ async def get_project(pid: str):
         if not rows:
             raise HTTPException(404, "Project not found")
         project = dict(rows[0])
+        # Hide synthetic chat-turn missions from the operator-facing project view —
+        # they're tracked separately under the chat surface.
         missions = await conn.execute_fetchall(
-            "SELECT * FROM missions WHERE project_id=? ORDER BY priority DESC, created_at DESC",
+            "SELECT * FROM missions WHERE project_id=? "
+            "AND COALESCE(is_chat_turn, 0) = 0 "
+            "ORDER BY priority DESC, created_at DESC",
             (pid,),
         )
         project["missions"] = [dict(m) for m in missions]
@@ -861,6 +1021,7 @@ async def list_missions(
     status: str = Query(None),
     tag: str = Query(None),
     parent_mission_id: str = Query(None),
+    include_chat_turns: bool = Query(False),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
@@ -871,6 +1032,11 @@ async def list_missions(
                    JOIN projects p ON p.id = m.project_id
                    WHERE 1=1"""
         params = []
+        # Hide synthetic chat-turn missions by default — they belong to the
+        # chat surface, not the operator mission board. Opt back in with
+        # `?include_chat_turns=true` (used by audit/debugging tooling).
+        if not include_chat_turns:
+            query += " AND COALESCE(m.is_chat_turn, 0) = 0"
         if project_id:
             query += " AND m.project_id=?"
             params.append(project_id)
@@ -1421,6 +1587,107 @@ async def resume(mid: str, body: DispatchOptions | None = None):
     return {"session_id": session_id, "status": "running", "resumed": True}
 
 
+@app.post("/api/missions/{mid}/reconcile-completed")
+async def reconcile_completed(mid: str, request: Request):
+    """Operator shortcut: mark an interrupted mission as completed and unblock its chain.
+
+    Use when a mission was interrupted by a backend restart but the work already
+    landed (branch pushed, PR opened, CI passed) before the interruption.
+
+    Allowed transition: interrupted → completed only.
+    Any other prior status returns 409 to prevent accidental progression of
+    genuinely incomplete work.
+
+    Returns the list of child mission IDs that became newly eligible for
+    auto-dispatch as a result of this reconciliation, so the UI can show
+    what was unblocked.
+    """
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT status FROM missions WHERE id=?", (mid,)
+        )
+        if not rows:
+            raise HTTPException(404, "Mission not found")
+        prior_status = dict(rows[0])["status"]
+        if prior_status != "interrupted":
+            raise HTTPException(
+                409,
+                f"Cannot reconcile: mission is '{prior_status}', not 'interrupted'. "
+                "Reconcile only applies to interrupted missions.",
+            )
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Flip the mission to completed
+        await conn.execute(
+            "UPDATE missions SET status='completed', updated_at=? WHERE id=?",
+            (now, mid),
+        )
+
+        # Flip the most recent agent_session for this mission to completed.
+        # Targets by started_at DESC so a mission that ran multiple times
+        # only reconciles the latest attempt.
+        await conn.execute(
+            """UPDATE agent_sessions
+               SET status='completed', ended_at=?, exit_code=0,
+                   error_log='Reconciled by operator: work landed before restart'
+               WHERE mission_id=?
+                 AND id=(
+                   SELECT id FROM agent_sessions
+                   WHERE mission_id=?
+                   ORDER BY started_at DESC
+                   LIMIT 1
+                 )""",
+            (now, mid, mid),
+        )
+
+        await conn.commit()
+
+        # Compute newly eligible children BEFORE nudging the watcher — the
+        # watcher may dispatch them immediately after the nudge, so querying
+        # after could miss them.
+        eligible_rows = await conn.execute_fetchall(
+            """SELECT id FROM missions
+               WHERE auto_dispatch = 1
+                 AND status = 'draft'
+                 AND COALESCE(is_chat_turn, 0) = 0
+                 AND EXISTS (
+                   SELECT 1 FROM json_each(depends_on) dep WHERE dep.value = ?
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM json_each(depends_on) dep
+                   WHERE dep.value NOT IN (
+                     SELECT id FROM missions WHERE status = 'completed'
+                   )
+                 )""",
+            (mid,),
+        )
+        child_ids = [r["id"] for r in eligible_rows]
+    finally:
+        await conn.close()
+
+    by_user = user.get("email") or user.get("sub") or "unknown"
+    await mission_watcher._emit_event(
+        mid, "reconciled",
+        data={"by_user": by_user, "prior_status": prior_status},
+    )
+
+    # Nudge the watcher so eligible children dispatch sub-second instead of
+    # waiting for the next heartbeat poll.
+    mission_watcher.wake()
+
+    return {
+        "mission_id": mid,
+        "prior_status": prior_status,
+        "newly_eligible_children": child_ids,
+    }
+
+
 # ──────────────────────────────────────────────
 # Sessions
 # ──────────────────────────────────────────────
@@ -1583,8 +1850,12 @@ async def dashboard_stats():
     conn = await db.get_db()
     try:
         projects = await conn.execute_fetchall("SELECT COUNT(*) AS c FROM projects")
+        # Exclude synthetic chat-turn missions so the dashboard reflects
+        # operator-driven work, not chat noise.
         missions_by_status = await conn.execute_fetchall(
-            "SELECT status, COUNT(*) AS c FROM missions GROUP BY status"
+            "SELECT status, COUNT(*) AS c FROM missions "
+            "WHERE COALESCE(is_chat_turn, 0) = 0 "
+            "GROUP BY status"
         )
         # Use DB as source of truth — in-memory running_tasks loses sessions on restart
         db_running = await conn.execute_fetchall(
