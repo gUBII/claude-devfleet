@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { projectChat, getBotHistory, createMission } from '../api/client';
+import { useAuth } from '../auth';
 import Moofasa from './Moofasa';
 import PlanActions from './PlanActions';
 
@@ -61,9 +62,23 @@ function HandoffCard({ handoff, onOpen }) {
   );
 }
 
-function MessageContent({ msg, projectId, onCreateMission, onOpenSession }) {
-  const draft = parseMissionBlock(msg.content);
-  const displayText = msg.content.replace(/```mission[\s\S]*?```/g, '').trim();
+function UserLabel({ email, currentEmail }) {
+  if (!email) return null;
+  const isYou = currentEmail && email === currentEmail;
+  const display = isYou ? 'You' : email.split('@')[0];
+  return (
+    <div style={{
+      fontSize: 10, opacity: 0.65, marginBottom: 4,
+      textTransform: 'uppercase', letterSpacing: 0.4, fontWeight: 600,
+      color: 'var(--text-muted)',
+    }}>{display}</div>
+  );
+}
+
+function MessageContent({ msg, projectId, onCreateMission, onOpenSession, currentEmail }) {
+  const content = msg.content || '';
+  const draft = parseMissionBlock(content);
+  const displayText = content.replace(/```mission[\s\S]*?```/g, '').trim();
   const isAssistant = msg.role === 'assistant';
   return (
     <>
@@ -71,6 +86,9 @@ function MessageContent({ msg, projectId, onCreateMission, onOpenSession }) {
         <div style={{ marginBottom: 6 }}>
           <PersonaBadge persona={msg.persona} />
         </div>
+      )}
+      {!isAssistant && (
+        <UserLabel email={msg.user_email} currentEmail={currentEmail} />
       )}
       {displayText && (
         isAssistant ? (
@@ -108,6 +126,8 @@ function MessageContent({ msg, projectId, onCreateMission, onOpenSession }) {
 }
 
 export default function ProjectBot({ projectId, projectName, onClose, navigate }) {
+  const { user } = useAuth();
+  const currentEmail = user?.email || null;
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
@@ -125,17 +145,29 @@ export default function ProjectBot({ projectId, projectName, onClose, navigate }
         if (rows.length === 0) {
           setMessages([{ role: 'assistant', content: welcomeMsg }]);
         } else {
-          setMessages(rows.map(r => ({
-            id: r.id,
-            role: r.role,
-            content: r.handoff_session_id ? '' : r.content,
-            is_plan: !!r.is_plan,
-            plan_title: r.plan_title,
-            persona: r.persona || null,
-            handoff: r.handoff_session_id
-              ? { session_id: r.handoff_session_id }
-              : undefined,
-          })));
+          setMessages(rows.map(r => {
+            const content = r.handoff_session_id ? '' : (r.content || '');
+            // TEMP DEBUG: surface rows that come in with content but render empty
+            if (r.role === 'user' && (r.content || '').length > 0 && content.length === 0) {
+              // Should be unreachable for non-handoff user rows
+              // eslint-disable-next-line no-console
+              console.warn('[ProjectBot] user row blanked at load', {
+                id: r.id, hsid: r.handoff_session_id, raw_len: r.content.length,
+              });
+            }
+            return {
+              id: r.id,
+              role: r.role,
+              content,
+              is_plan: !!r.is_plan,
+              plan_title: r.plan_title,
+              persona: r.persona || null,
+              user_email: r.user_email || null,
+              handoff: r.handoff_session_id
+                ? { session_id: r.handoff_session_id }
+                : undefined,
+            };
+          }));
         }
       })
       .catch(() => {
@@ -163,7 +195,7 @@ export default function ProjectBot({ projectId, projectName, onClose, navigate }
     const wasPlanner = plannerMode;
     setInput('');
     setError(null);
-    setMessages(prev => [...prev, { role: 'user', content: text }]);
+    setMessages(prev => [...prev, { role: 'user', content: text, user_email: currentEmail }]);
     setStreaming(true);
 
     let botMsg = '';
@@ -171,6 +203,7 @@ export default function ProjectBot({ projectId, projectName, onClose, navigate }
 
     let currentPersona = null;
     let handoff = null;
+    let errored = false;
 
     projectChat(projectId, text, {
       planner_mode: wasPlanner,
@@ -179,6 +212,7 @@ export default function ProjectBot({ projectId, projectName, onClose, navigate }
         setMessages(prev => {
           const updated = [...prev];
           const last = updated[updated.length - 1];
+          if (!last?._streaming) return prev;
           updated[updated.length - 1] = { ...last, persona: currentPersona };
           return updated;
         });
@@ -190,6 +224,8 @@ export default function ProjectBot({ projectId, projectName, onClose, navigate }
         botMsg += chunk;
         setMessages(prev => {
           const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (!last?._streaming) return prev;
           updated[updated.length - 1] = {
             role: 'assistant',
             content: botMsg,
@@ -203,6 +239,7 @@ export default function ProjectBot({ projectId, projectName, onClose, navigate }
         setMessages(prev => {
           const updated = [...prev];
           const last = updated[updated.length - 1];
+          if (!last?._streaming) return prev;
           updated[updated.length - 1] = {
             ...last,
             id: meta.id,
@@ -214,9 +251,11 @@ export default function ProjectBot({ projectId, projectName, onClose, navigate }
       },
       onDone: () => {
         setStreaming(false);
+        if (errored) return; // onError already cleaned up; never touch the user bubble
         setMessages(prev => {
           const updated = [...prev];
           const last = updated[updated.length - 1];
+          if (!last?._streaming) return prev;
           updated[updated.length - 1] = {
             ...last,
             content: handoff ? '' : botMsg,
@@ -229,6 +268,7 @@ export default function ProjectBot({ projectId, projectName, onClose, navigate }
         requestAnimationFrame(() => inputRef.current?.focus());
       },
       onError: (err) => {
+        errored = true;
         setStreaming(false);
         setError(String(err));
         setMessages(prev => prev.filter(m => !m._streaming));
@@ -291,6 +331,7 @@ export default function ProjectBot({ projectId, projectName, onClose, navigate }
                 projectId={projectId}
                 onCreateMission={handleCreateMission}
                 onOpenSession={(sid) => navigate?.('live', sid)}
+                currentEmail={currentEmail}
               />
             )}
           </div>

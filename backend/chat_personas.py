@@ -141,6 +141,7 @@ async def run_inline_persona(
 
     char_count = 0
     failed = False
+    saw_text_block = False
     try:
         async for msg in sdk_query(prompt=full_prompt, options=options):
             if msg is None:
@@ -148,9 +149,10 @@ async def run_inline_persona(
             if hasattr(msg, "content"):
                 for block in msg.content:
                     if isinstance(block, TextBlock):
+                        saw_text_block = True
                         char_count += len(block.text)
                         yield {"type": "text", "text": block.text}
-            elif hasattr(msg, "result") and msg.result:
+            elif hasattr(msg, "result") and msg.result and not saw_text_block:
                 char_count += len(msg.result)
                 yield {"type": "text", "text": msg.result}
     except Exception:
