@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { listMissions, listProjects, createMission } from '../api/client';
+import { listMissions, listProjects, createMission, reconcileMission } from '../api/client';
 import MissionCard from '../components/MissionCard';
 
 const TABS = ['all', 'draft', 'queued', 'running', 'completed', 'failed', 'interrupted'];
@@ -12,6 +12,7 @@ export default function MissionBoard({ navigate }) {
   const [showModal, setShowModal] = useState(false);
   const [form, setForm] = useState({ project_id: '', title: '', detailed_prompt: '', acceptance_criteria: '', priority: 0, tags: '', model: 'claude-opus-4-7', mission_type: 'implement', auto_dispatch: false, schedule_cron: '', depends_on: '' });
   const [error, setError] = useState(null);
+  const [reconcileToast, setReconcileToast] = useState(null);
 
   const load = async () => {
     try {
@@ -36,6 +37,37 @@ export default function MissionBoard({ navigate }) {
     const key = filterProject ? (m.project_id === filterProject ? m.status : null) : m.status;
     if (key) counts[key] = (counts[key] || 0) + 1;
   });
+
+  /**
+   * Returns true when a mission is 'interrupted' AND has at least one
+   * auto_dispatch child in 'draft' state that depends on it.  This is
+   * the condition that makes the "Resume chain" button meaningful.
+   */
+  const hasBlockedChildren = (mission) => {
+    if (mission.status !== 'interrupted') return false;
+    return missions.some(m => {
+      if (m.auto_dispatch !== 1 || m.status !== 'draft') return false;
+      try {
+        return JSON.parse(m.depends_on || '[]').includes(mission.id);
+      } catch { return false; }
+    });
+  };
+
+  const handleReconcile = async (mid) => {
+    try {
+      const result = await reconcileMission(mid);
+      const n = result.newly_eligible_children.length;
+      const msg = n > 0
+        ? `Chain resumed — ${n} mission${n > 1 ? 's' : ''} unblocked for auto-dispatch`
+        : 'Mission marked completed';
+      setReconcileToast({ ok: true, msg });
+      setTimeout(() => setReconcileToast(null), 6000);
+      load();
+    } catch (e) {
+      setReconcileToast({ ok: false, msg: `Reconcile failed: ${e.message}` });
+      setTimeout(() => setReconcileToast(null), 8000);
+    }
+  };
 
   const handleCreate = async (e) => {
     e.preventDefault();
@@ -78,6 +110,25 @@ export default function MissionBoard({ navigate }) {
 
       {error && <div style={{ color: 'var(--danger)', marginBottom: 16 }}>{error}</div>}
 
+      {reconcileToast && (
+        <div
+          onClick={() => setReconcileToast(null)}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 10,
+            padding: '10px 14px', marginBottom: 12, cursor: 'pointer',
+            background: reconcileToast.ok ? 'var(--success-soft)' : 'var(--danger-soft)',
+            border: `1px solid ${reconcileToast.ok ? 'var(--success)' : 'var(--danger)'}`,
+            borderLeft: `3px solid ${reconcileToast.ok ? 'var(--success)' : 'var(--danger)'}`,
+            borderRadius: 'var(--radius-md)', fontSize: 13, fontWeight: 500,
+          }}
+        >
+          <span style={{ fontWeight: 700, color: reconcileToast.ok ? 'var(--success)' : 'var(--danger)' }}>
+            {reconcileToast.ok ? '✓' : '✕'}
+          </span>
+          {reconcileToast.msg}
+        </div>
+      )}
+
       <div className="filter-tabs">
         {TABS.map(tab => (
           <button key={tab} className={`filter-tab ${activeTab === tab ? 'active' : ''}`} onClick={() => setActiveTab(tab)}>
@@ -99,7 +150,12 @@ export default function MissionBoard({ navigate }) {
       ) : (
         <div className="flex flex-col gap-8">
           {filtered.map(m => (
-            <MissionCard key={m.id} mission={m} onClick={() => navigate('mission', m.id)} />
+            <MissionCard
+                key={m.id}
+                mission={m}
+                onClick={() => navigate('mission', m.id)}
+                onReconcile={hasBlockedChildren(m) ? handleReconcile : undefined}
+              />
           ))}
         </div>
       )}

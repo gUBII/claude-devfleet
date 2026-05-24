@@ -48,6 +48,8 @@ export const dispatchMission = (id, opts = null) =>
 export const generateNextMission = (id) => request(`/missions/${id}/generate-next`, { method: 'POST' });
 export const resumeMission = (id, opts = null) =>
   request(`/missions/${id}/resume`, { method: 'POST', body: opts ? JSON.stringify(opts) : '{}' });
+export const reconcileMission = (id) =>
+  request(`/missions/${id}/reconcile-completed`, { method: 'POST' });
 
 // ── Mission Children, Events & Scheduling ──
 export const getMissionChildren = (id) => request(`/missions/${id}/children`);

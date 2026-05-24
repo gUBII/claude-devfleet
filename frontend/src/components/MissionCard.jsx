@@ -25,7 +25,7 @@ function timeAgo(dateStr) {
   return `${days}d ago`;
 }
 
-export default function MissionCard({ mission, onClick }) {
+export default function MissionCard({ mission, onClick, onReconcile }) {
   const hasParent = !!mission.parent_mission_id;
   const isAutoDispatch = mission.auto_dispatch === 1;
   const isScheduled = !!mission.schedule_cron;
@@ -84,6 +84,23 @@ export default function MissionCard({ mission, onClick }) {
         </div>
       </div>
       <StatusBadge status={mission.status} />
+      {mission.status === 'interrupted' && onReconcile && (
+        <button
+          title="Work landed before restart — mark completed and unblock dependent missions"
+          onClick={e => { e.stopPropagation(); onReconcile(mission.id); }}
+          style={{
+            marginLeft: 8, padding: '3px 10px',
+            fontSize: 11, fontWeight: 700, cursor: 'pointer',
+            background: 'rgba(249,115,22,0.12)', color: 'var(--warning)',
+            border: '1px solid rgba(249,115,22,0.35)',
+            borderRadius: 'var(--radius-full)',
+            whiteSpace: 'nowrap', flexShrink: 0,
+            letterSpacing: '0.02em',
+          }}
+        >
+          ✓ Resume chain
+        </button>
+      )}
     </div>
   );
 }
