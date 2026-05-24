@@ -1,74 +1,40 @@
-"""Moofasa — per-project chat assistant that drafts missions (and plans).
+"""Per-project chat — routes operator messages to one of three personas.
 
-Streams SSE chunks to the caller. Moofasa is hard-scoped to one project and
-can produce two output shapes:
+The streaming endpoint owned by app.py calls `stream_bot_response()` here;
+this module is the dispatcher that:
 
-- Mission drafts (default, Haiku): short single-mission JSON in a ```mission
-  code fence.
-- Full plans (planner mode, Opus): structured markdown plans saved with
-  is_plan=1 so subsequent chat history is context-compacted.
+  1. Classifies the message via `chat_router.classify` (slash command >
+     force_persona > legacy planner_mode > keyword heuristic > researcher).
+  2. Emits a leading `persona` SSE event so the frontend can render the
+     badge before any text streams.
+  3. Performs RBAC via `auth.has_permission`. Denied turns audit-log and
+     return a user-safe error — they never reach the persona.
+  4. Dispatches:
+       - researcher / architect → `chat_personas.run_inline_persona` (direct
+         SDK call, streams text events).
+       - git_operator → `chat_personas.start_git_operator_turn` (synthetic
+         agent_session via the existing dispatch pipeline). Emits a
+         `session_handoff` event; the frontend opens a second EventSource on
+         `/api/sessions/{sid}/stream` to watch tool_use / hitl events.
+  5. Persists the assistant reply to `project_bot_history` with `user_id` +
+     `persona` attribution. `is_plan=1` only for architect plans (not quick
+     patches) so context compaction works the same as the old planner_mode.
 
-Tools are read-only (Read/Glob/Grep) under permission_mode="default" — Moofasa
-can crawl the project to understand context, but cannot write or execute.
+Audit responsibility split:
+  - Permission denials + missing-precondition errors are logged here.
+  - Persona success / failure rows are logged inside `chat_personas`.
+  - No double-logging.
+
+Backward compatibility:
+  - `planner_mode=True` from the legacy chat client maps to forced architect.
+  - Existing `text`, `error`, `done`, `plan_meta` SSE event types preserved.
+  - New event types added: `persona`, `session_handoff` (git_operator only).
 """
 
 import json
 import logging
-import os
 
 log = logging.getLogger("devfleet.project_bot")
-
-_BOT_SYSTEM = """You are Moofasa, the Nexis365 DevFleet assistant for the project: {project_name}
-Project path: {project_path}
-Project description: {description}
-
-You help the team draft coding missions for their Claude agents. You can read
-files in this project to understand the codebase before drafting.
-
-SCOPE RULES (hard limits — never violate):
-1. You ONLY help with this project. Politely refuse requests about other projects.
-2. You cannot execute code, dispatch agents, or modify files directly — you only have READ tools.
-3. You can: read the codebase, answer questions, give advice, and produce MISSION DRAFTS.
-4. When producing a mission draft, format it exactly like this:
-   ```mission
-   {{"title": "...", "detailed_prompt": "...", "acceptance_criteria": "..."}}
-   ```
-5. The user reviews the draft and creates the mission manually.
-
-Recent project context:
-{context}
-
-Keep responses concise and actionable."""
-
-
-_PLANNER_APPEND = """
-
-The user has requested a FULL PLAN (Planner mode, Opus). Produce a single
-markdown document with these sections, in order:
-
-# <Plan Title — one short imperative sentence>
-
-## Context
-Why this plan exists; what problem it addresses.
-
-## Phases
-Numbered phases (Phase 1, Phase 2, …) each with concrete steps the team or
-agents will execute. Phases must be self-contained enough that a fresh agent
-could pick one up cold.
-
-## Acceptance Criteria
-A bulleted list of mechanically-checkable conditions — what "done" looks like.
-
-## Risks
-What could go wrong, with mitigations.
-
-## Files Touched
-Table or list of paths that will change, with one-line "what changes" notes.
-
-In Planner mode, do NOT emit ```mission code fences — this output is a roadmap,
-not a single mission. The user will save the plan and may extract specific
-phases into missions later.
-"""
 
 
 async def stream_bot_response(
@@ -77,15 +43,62 @@ async def stream_bot_response(
     message: str,
     user: dict,
     planner_mode: bool = False,
+    force_persona: str | None = None,
 ):
-    """Async generator yielding SSE data lines. Saves assistant reply to DB on completion.
-
-    In planner_mode, uses Opus + a longer plan-shaped system prompt and persists
-    the reply with is_plan=1 so subsequent chats compact it.
-    """
+    """Async generator yielding SSE `data: <json>\\n\\n` lines."""
+    import auth
+    import chat_audit
+    import chat_personas
+    import chat_router
     import db
-    from claude_code_sdk import query as sdk_query, ClaudeCodeOptions
-    from claude_code_sdk.types import TextBlock
+
+    user_id = (user or {}).get("sub") or (user or {}).get("id") or ""
+    project_id = project.get("id") or pid
+
+    persona, intent, requires_confirm, required_permission = chat_router.classify(
+        message,
+        force_persona=force_persona,
+        legacy_planner_mode=planner_mode,
+    )
+    clean_message = chat_router.strip_slash_prefix(message)
+
+    yield (
+        "data: "
+        + json.dumps(
+            {
+                "type": "persona",
+                "persona": persona,
+                "intent": intent,
+                "requires_confirm": requires_confirm,
+            }
+        )
+        + "\n\n"
+    )
+
+    if required_permission and not await auth.has_permission(user_id, required_permission):
+        await chat_audit.log_action(
+            project_id,
+            user_id,
+            persona,
+            intent,
+            status="permission_denied",
+            data={
+                "permission": required_permission,
+                "message_preview": (message or "")[:200],
+            },
+        )
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "error",
+                    "text": f"Permission denied: requires {required_permission}",
+                }
+            )
+            + "\n\n"
+        )
+        yield "data: " + json.dumps({"type": "done"}) + "\n\n"
+        return
 
     conn = await db.get_db()
     try:
@@ -95,105 +108,185 @@ async def stream_bot_response(
             (pid,),
         )
         mission_rows = await conn.execute_fetchall(
-            "SELECT title, status FROM missions WHERE project_id=? ORDER BY created_at DESC LIMIT 10",
+            "SELECT title, status FROM missions WHERE project_id=? "
+            "AND COALESCE(is_chat_turn, 0) = 0 "
+            "ORDER BY created_at DESC LIMIT 10",
             (pid,),
         )
     finally:
         await conn.close()
 
     history = list(reversed([dict(r) for r in history_rows]))
-    missions_text = "\n".join(f"- [{m['status']}] {m['title']}" for m in mission_rows)
-    context = f"Recent missions:\n{missions_text or 'No missions yet.'}"
-
-    system_prompt = _BOT_SYSTEM.format(
-        project_name=project["name"],
-        project_path=project["path"],
-        description=project.get("description") or "No description",
-        context=context,
+    missions_text = "\n".join(
+        f"- [{m['status']}] {m['title']}" for m in mission_rows
     )
-    if planner_mode:
-        system_prompt += _PLANNER_APPEND
+    missions_context = (
+        f"Recent missions:\n{missions_text}" if missions_text else ""
+    )
 
-    # Context compaction: collapse prior plan rows to a one-liner so they
-    # don't blow the prompt window on the next chat turn.
-    history_text = ""
-    for msg in history[:-1]:  # last entry is the user message we just saved
-        if msg.get("is_plan"):
-            history_text += (
-                f"Assistant: [earlier: drafted plan \"{msg.get('plan_title') or 'Untitled'}\"]\n\n"
+    if persona == "git_operator":
+        token_row = await auth.get_github_token(user_id)
+        if not token_row:
+            await chat_audit.log_action(
+                project_id,
+                user_id,
+                persona,
+                intent,
+                status="precondition_missing",
+                data={
+                    "reason": "no_github_token",
+                    "message_preview": clean_message[:200],
+                },
             )
-        else:
-            prefix = "Human" if msg["role"] == "user" else "Assistant"
-            history_text += f"{prefix}: {msg['content']}\n\n"
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "error",
+                        "text": (
+                            "I need your GitHub token to run git operations. "
+                            "Paste your PAT (starts with `ghp_…` or "
+                            "`github_pat_…`) in this chat — I'll save it "
+                            "encrypted and scrub it from the history "
+                            "immediately. Generate one at "
+                            "https://github.com/settings/tokens (scopes: "
+                            "repo, workflow)."
+                        ),
+                    }
+                )
+                + "\n\n"
+            )
+            yield "data: " + json.dumps({"type": "done"}) + "\n\n"
+            return
+        gh_token, _gh_username = token_row
 
-    full_prompt = f"{system_prompt}\n\n{history_text}Human: {message}\n\nAssistant:"
+        try:
+            result = await chat_personas.start_git_operator_turn(
+                project,
+                user,
+                clean_message,
+                intent,
+                github_token=gh_token,
+                requires_confirm=requires_confirm,
+            )
+        except Exception:
+            log.exception(
+                "Failed to start git_operator turn for project %s", project_id
+            )
+            await chat_audit.log_action(
+                project_id,
+                user_id,
+                persona,
+                intent,
+                status="failed",
+                data={"reason": "dispatch_setup_failed"},
+            )
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "error",
+                        "text": "Failed to start git operator — try again.",
+                    }
+                )
+                + "\n\n"
+            )
+            yield "data: " + json.dumps({"type": "done"}) + "\n\n"
+            return
 
-    cwd = project["path"] if project.get("path") and os.path.isdir(project["path"]) else "/tmp"
+        placeholder = (
+            f"[git_operator handoff → session {result['session_id']}]"
+        )
+        conn = await db.get_db()
+        try:
+            await conn.execute(
+                "INSERT INTO project_bot_history "
+                "(project_id, role, content, user_id, persona, handoff_session_id) "
+                "VALUES (?, 'assistant', ?, ?, 'git_operator', ?)",
+                (pid, placeholder, user_id, result["session_id"]),
+            )
+            await conn.commit()
+        finally:
+            await conn.close()
 
-    if planner_mode:
-        model = os.environ.get("DEVFLEET_PLANNER_MODEL", "claude-opus-4-7")
-        max_turns = 8
-    else:
-        model = os.environ.get("DEVFLEET_BOT_MODEL", "claude-haiku-4-5-20251001")
-        max_turns = 4
-
-    options = ClaudeCodeOptions(
-        model=model,
-        permission_mode="default",
-        allowed_tools=["Read", "Glob", "Grep"],
-        max_turns=max_turns,
-        cwd=cwd,
-    )
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "session_handoff",
+                    "session_id": result["session_id"],
+                    "mission_id": result["mission_id"],
+                    "persona": "git_operator",
+                }
+            )
+            + "\n\n"
+        )
+        yield "data: " + json.dumps({"type": "done"}) + "\n\n"
+        return
 
     reply_chunks: list[str] = []
     try:
-        async for msg in sdk_query(prompt=full_prompt, options=options):
-            if msg is None:
-                continue
-            if hasattr(msg, "content"):
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        reply_chunks.append(block.text)
-                        yield f"data: {json.dumps({'type': 'text', 'text': block.text})}\n\n"
-            elif hasattr(msg, "result") and msg.result:
-                reply_chunks.append(msg.result)
-                yield f"data: {json.dumps({'type': 'text', 'text': msg.result})}\n\n"
-    except Exception as exc:
-        log.error("Bot stream error for project %s: %s", pid, exc)
-        yield f"data: {json.dumps({'type': 'error', 'text': 'Bot error — please try again'})}\n\n"
-        return
+        async for event in chat_personas.run_inline_persona(
+            persona,
+            project,
+            user,
+            clean_message,
+            history,
+            intent=intent,
+            extra_context=missions_context,
+        ):
+            if event.get("type") == "text":
+                reply_chunks.append(event.get("text", ""))
+            yield "data: " + json.dumps(event) + "\n\n"
+    except Exception:
+        log.exception("Inline persona %s failed for project %s", persona, project_id)
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "error",
+                    "text": "Persona stream error — please try again.",
+                }
+            )
+            + "\n\n"
+        )
 
     full_reply = "".join(reply_chunks)
-    plan_row_id = None
-    plan_title = None
+    plan_row_id: int | None = None
+    plan_title: str | None = None
     if full_reply:
-        if planner_mode:
-            # Use first heading or first line as title.
+        is_plan = 1 if persona == "architect" and intent == "plan" else 0
+        if is_plan:
             first_line = (full_reply.splitlines() or [""])[0]
             plan_title = first_line.lstrip("# ").strip()[:200] or "Untitled plan"
-            conn = await db.get_db()
-            try:
-                cur = await conn.execute(
-                    "INSERT INTO project_bot_history (project_id, role, content, is_plan, plan_title) "
-                    "VALUES (?, 'assistant', ?, 1, ?)",
-                    (pid, full_reply, plan_title),
-                )
+        conn = await db.get_db()
+        try:
+            cur = await conn.execute(
+                "INSERT INTO project_bot_history "
+                "(project_id, role, content, is_plan, plan_title, user_id, persona) "
+                "VALUES (?, 'assistant', ?, ?, ?, ?, ?)",
+                (
+                    pid,
+                    full_reply,
+                    is_plan,
+                    plan_title or "",
+                    user_id,
+                    persona,
+                ),
+            )
+            if is_plan:
                 plan_row_id = cur.lastrowid
-                await conn.commit()
-            finally:
-                await conn.close()
-        else:
-            conn = await db.get_db()
-            try:
-                await conn.execute(
-                    "INSERT INTO project_bot_history (project_id, role, content) VALUES (?, 'assistant', ?)",
-                    (pid, full_reply),
-                )
-                await conn.commit()
-            finally:
-                await conn.close()
+            await conn.commit()
+        finally:
+            await conn.close()
 
-    if planner_mode and plan_row_id is not None:
-        yield f"data: {json.dumps({'type': 'plan_meta', 'id': plan_row_id, 'title': plan_title})}\n\n"
+    if plan_row_id is not None:
+        yield (
+            "data: "
+            + json.dumps(
+                {"type": "plan_meta", "id": plan_row_id, "title": plan_title}
+            )
+            + "\n\n"
+        )
 
-    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+    yield "data: " + json.dumps({"type": "done"}) + "\n\n"

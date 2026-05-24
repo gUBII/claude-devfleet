@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getDashboardStats } from '../api/client';
 import { useAuth } from '../auth';
+import ChangePassword from './ChangePassword';
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1' },
@@ -15,6 +16,7 @@ const NAV = [
 export default function Sidebar({ activePage, navigate, agentDelta = 0 }) {
   const { user, logout, isAdmin } = useAuth();
   const [runningAgents, setRunningAgents] = useState(0);
+  const [showChangePw, setShowChangePw] = useState(false);
   const prevDelta = useRef(0);
 
   useEffect(() => {
@@ -82,9 +84,17 @@ export default function Sidebar({ activePage, navigate, agentDelta = 0 }) {
         <div className="sidebar-user-section">
           <div className="sidebar-user-email" title={user.email}>{user.email}</div>
           {isAdmin && <div className="sidebar-user-role">Admin</div>}
+          <button
+            className="sidebar-logout"
+            style={{ marginBottom: 6, opacity: 0.75 }}
+            onClick={() => setShowChangePw(true)}
+          >
+            Change password
+          </button>
           <button className="sidebar-logout" onClick={logout}>Sign out</button>
         </div>
       )}
+      {showChangePw && <ChangePassword onClose={() => setShowChangePw(false)} />}
     </aside>
   );
 }

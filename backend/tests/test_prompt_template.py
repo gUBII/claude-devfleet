@@ -144,20 +144,41 @@ def test_no_previous_context_without_last_report():
 
 
 @pytest.mark.unit
-def test_rebase_discipline_section_present():
+def test_protocol_discovery_section_present():
+    """Template must instruct agents to discover project rules from project files,
+    not assume a hardcoded branch or commit style."""
     prompt = prompt_template.build_prompt(_base_mission())
-    assert "## Git Rebase Discipline (MANDATORY)" in prompt
-    assert "git rebase origin/dev" in prompt
-    assert "Run this again even if you just did it" in prompt
+    assert "## Project CI/CD Discipline" in prompt
+    # Discovery list — protocol files the agent should look for
+    assert "docs/CI_CD_PIPELINE.md" in prompt
+    assert "AGENTS.md" in prompt
+    # Inference fallbacks
+    assert "git log --oneline" in prompt
+    assert "git symbolic-ref refs/remotes/origin/HEAD" in prompt
+    # Owner-ask escalation when no protocol is discoverable
+    assert "DECISION NEEDED" in prompt
+
+
+@pytest.mark.unit
+def test_rebase_discipline_section_present():
+    """Rebase guidance stays — but against the *discovered* base branch, not hardcoded `dev`."""
+    prompt = prompt_template.build_prompt(_base_mission())
+    assert "## Git Rebase Discipline" in prompt
     assert "git rebase --abort" in prompt
+    # Must NOT hardcode dev
+    assert "git rebase origin/dev" not in prompt
+    # Must use the placeholder convention
+    assert "<base-branch>" in prompt
 
 
 @pytest.mark.unit
 def test_validation_discipline_present():
     prompt = prompt_template.build_prompt(_base_mission())
     assert "## Validation Discipline" in prompt
-    assert "timeout 300" in prompt
-    assert "pnpm --filter" in prompt
+    # timeout is now conditional / platform-aware, not mandatory
+    assert "timeout" in prompt
+    assert "gtimeout" in prompt  # macOS handling acknowledged
+    assert "--filter" in prompt
     assert "Commit before you validate" in prompt or "Commit your code FIRST" in prompt
 
 

@@ -111,3 +111,149 @@ async def consume_invite_token(token: str, used_by: str) -> bool:
         return True
     finally:
         await conn.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Persona chat — RBAC + per-user GitHub PAT (Fernet-encrypted at rest)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+async def has_permission(user_id: str, permission: str) -> bool:
+    """Return True if the user has the given chat permission.
+
+    Admins implicitly hold every permission — this keeps the matrix small and
+    avoids accidental admin lockout when a new permission is introduced.
+    Non-admins need an explicit row in user_permissions.
+    """
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT role FROM users WHERE id=?", (user_id,)
+        )
+        if rows and dict(rows[0]).get("role") == "admin":
+            return True
+        rows = await conn.execute_fetchall(
+            "SELECT 1 FROM user_permissions WHERE user_id=? AND permission=?",
+            (user_id, permission),
+        )
+        return bool(rows)
+    finally:
+        await conn.close()
+
+
+async def grant_permission(user_id: str, permission: str, granted_by: str) -> None:
+    """Idempotently grant a permission."""
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            "INSERT OR IGNORE INTO user_permissions "
+            "(user_id, permission, granted_by) VALUES (?, ?, ?)",
+            (user_id, permission, granted_by),
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def revoke_permission(user_id: str, permission: str) -> None:
+    """Revoke a permission. Idempotent — revoking an absent grant is a no-op."""
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            "DELETE FROM user_permissions WHERE user_id=? AND permission=?",
+            (user_id, permission),
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def list_permissions(user_id: str) -> list[str]:
+    """Return the user's explicit permission grants. Admins do NOT short-circuit
+    here — this surface backs the permissions UI, where admins should see their
+    role from the role column rather than every-permission-checked."""
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT permission FROM user_permissions WHERE user_id=? ORDER BY permission",
+            (user_id,),
+        )
+        return [dict(r)["permission"] for r in rows]
+    finally:
+        await conn.close()
+
+
+async def set_github_token(
+    user_id: str, token: str, github_username: str = ""
+) -> None:
+    """Store the user's GitHub PAT, encrypted at rest. The legacy plaintext
+    `github_token` column is cleared so we never have both copies on disk."""
+    import crypto
+
+    enc = crypto.encrypt(token)
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            "UPDATE users SET github_token_encrypted=?, github_username=?, github_token='' "
+            "WHERE id=?",
+            (enc, github_username, user_id),
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def get_github_token(user_id: str) -> tuple[str, str] | None:
+    """Decrypt and return (token, github_username) or None.
+
+    Falls back to the legacy plaintext `github_token` column for rows that
+    pre-date encryption AND failed to encrypt at boot (e.g. Fernet key was
+    missing during init_db). Returning plaintext beats failing dispatch, but
+    log.warning so the operator can fix the deployment.
+    """
+    import crypto
+
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT github_token, github_token_encrypted, github_username FROM users WHERE id=?",
+            (user_id,),
+        )
+        if not rows:
+            return None
+        row = dict(rows[0])
+    finally:
+        await conn.close()
+
+    enc = (row.get("github_token_encrypted") or "").strip()
+    username = (row.get("github_username") or "").strip()
+    if enc:
+        try:
+            return crypto.decrypt(enc), username
+        except ValueError as exc:
+            log.warning("Failed to decrypt github_token for user %s: %s", user_id, exc)
+            return None
+
+    plain = (row.get("github_token") or "").strip()
+    if plain:
+        log.warning(
+            "Returning unencrypted github_token for user %s — encryption migration "
+            "did not run for this row. Set DEVFLEET_FERNET_KEY and restart.",
+            user_id,
+        )
+        return plain, username
+    return None
+
+
+async def clear_github_token(user_id: str) -> None:
+    """Wipe both token columns + the username for the user."""
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            "UPDATE users SET github_token='', github_token_encrypted='', github_username='' "
+            "WHERE id=?",
+            (user_id,),
+        )
+        await conn.commit()
+    finally:
+        await conn.close()

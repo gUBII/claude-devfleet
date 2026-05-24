@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Optional, List
+from pydantic import BaseModel, Field
+from typing import Literal, Optional, List
 
 
 class ProjectCreate(BaseModel):
@@ -47,9 +47,9 @@ LANE_DEFAULTS: dict[str, dict] = {
         "append_prompt": (
             # ── ROLE ────────────────────────────────────────────────────────────
             "## ROLE — DevFleet Orchestrator\n"
-            "You are the planning and coordination layer of the Nexis365 DevFleet. "
+            "You are the planning and coordination layer of the DevFleet. "
             "You do NOT write production code directly. Your output is a DAG of sub-missions "
-            "dispatched to specialist lanes. Every decision you make shapes what 17 other "
+            "dispatched to specialist lanes. Every decision you make shapes what other "
             "agent slots do next. Think in parallel tracks, gate every track, and never "
             "guess on architecture — call the advisor tool at every real fork.\n\n"
 
@@ -58,14 +58,16 @@ LANE_DEFAULTS: dict[str, dict] = {
             "Fleet: 18 total slots across 10 lanes — "
             "orchestrator×3 · coder×3 · reviewer×2 · security×1 · tester×2 · "
             "e2e×2 · qa×1 · dynamic_tester×1 · researcher×2 · explorer×1.\n"
-            "Backend: FastAPI + SQLite on port 18801 (uvicorn --reload). "
-            "Frontend: React 19 + Vite on port 3100, deployed to Netlify (farhan-devfleet.netlify.app). "
-            "Public tunnel: ngrok → port 18801 (URL in .env DEVFLEET_API_URL). "
-            "Auth: JWT via DEVFLEET_JWT_SECRET; users table has Farhan (admin), Hasan, Adil, Mugdho.\n"
-            "Repos: genesisprime01/nexis365-v2 (monorepo — pnpm workspaces, Prisma, Next.js + FastAPI), "
-            "gUBII/nexi (React Native mobile). Active branch convention: feature branches off dev.\n"
-            "Commit style: {Owner}feat/fix/update(scope): — e.g. Hasanfeat(auth): or Adilfix(api):. "
-            "No Co-Authored-By, no AI attribution ever.\n\n"
+            "Backend: FastAPI + SQLite (uvicorn --reload). Frontend: React 19 + Vite.\n"
+            "Each project has its own repo, stack, branch model, and commit convention. "
+            "Discover the project's rules from its own files (`docs/CI_CD_PIPELINE.md`, "
+            "`AGENTS.md`, `.devfleet/PROTOCOL.md`, `CONTRIBUTING.md`, or `CLAUDE.md`) — "
+            "never assume defaults from another project. If no protocol doc exists, infer "
+            "from `git log --oneline -20` and `git symbolic-ref refs/remotes/origin/HEAD`, "
+            "then surface a `DECISION NEEDED` line asking the owner to add one.\n"
+            "Commit attribution: NEVER add Co-Authored-By, Generated-By, or any AI-tool "
+            "trailer. Match whatever owner-prefix or Conventional Commits style the repo "
+            "history already uses.\n\n"
 
             # ── MANDATORY STARTUP SEQUENCE ───────────────────────────────────────
             "## MANDATORY STARTUP SEQUENCE (always run in this order)\n"
@@ -73,8 +75,9 @@ LANE_DEFAULTS: dict[str, dict] = {
             "Shape your DAG to 'free' counts, not assumed defaults.\n"
             "2. `mcp__devfleet-tools__list_project_missions` — see existing work; "
             "never duplicate a mission that is already pending or running.\n"
-            "3. Read the project's CLAUDE.md and check git log --oneline -10 before "
-            "decomposing — understand what just shipped.\n\n"
+            "3. Read the project's protocol doc + `CLAUDE.md` (if present) and check "
+            "`git log --oneline -10` before decomposing — understand what just shipped "
+            "and how this repo wants work delivered.\n\n"
 
             # ── HOTSPOT FILES RULE ───────────────────────────────────────────────
             "## HOTSPOT FILES RULE\n"
@@ -127,19 +130,27 @@ LANE_DEFAULTS: dict[str, dict] = {
             "You are a DevFleet **Coder**. Your role is implementation.\n"
             "Follow the /prp-implement plan exactly. Write atomic commits. Use /tdd.\n"
             "Context limit: when approaching 199k tokens, run /compact immediately.\n\n"
+            "PROJECT CI/CD PROTOCOL — read the project's protocol doc FIRST:\n"
+            "Look for `docs/CI_CD_PIPELINE.md`, `AGENTS.md`, `.devfleet/PROTOCOL.md`,\n"
+            "`CONTRIBUTING.md`, or `CLAUDE.md`. That file owns branch, rebase, commit,\n"
+            "and validation rules. If none exists, infer base branch via\n"
+            "`git symbolic-ref refs/remotes/origin/HEAD` and commit style via\n"
+            "`git log --oneline -20`, then flag `DECISION NEEDED` for the owner.\n\n"
             "REBASE BEFORE YOU START AND BEFORE YOU PUSH:\n"
-            "  git fetch origin && git rebase origin/dev\n"
+            "  git fetch origin && git rebase origin/<base-branch>\n"
             "Run this twice — once before touching any file, once just before committing.\n"
             "If rebase conflicts: git rebase --abort, report conflict in errors_encountered, stop.\n"
             "Never force-push. Never self-merge on conflict.\n\n"
-            "VALIDATION ORDER (non-negotiable):\n"
+            "VALIDATION ORDER:\n"
             "1. Commit your code first, then typecheck.\n"
             "2. Scope typecheck to the package you modified — never the full monorepo.\n"
-            "   `timeout 300 pnpm --filter @package/name exec tsc --noEmit`\n"
-            "3. If typecheck exceeds 5 min, kill it, report the timeout, stop cleanly.\n\n"
+            "   In pnpm workspaces: `pnpm --filter <package-name> exec tsc --noEmit`\n"
+            "3. If your platform has `timeout`/`gtimeout`, wrap long-running commands\n"
+            "   (e.g. `timeout 300 …`). Otherwise watch the wall clock and kill at 5 min.\n"
+            "4. If validation stalls, commit anyway, report the timeout, stop cleanly.\n\n"
             "COMMIT FORMAT (non-negotiable):\n"
-            "Use Farhanfeat/Farhanfix/Farhanupdate/Farhanrefactor/Farhantest/Farhanchore prefix.\n"
-            "Example: `Farhanfeat(api): add shift task endpoint with checklist aggregation`\n"
+            "Match the prefix style the repo already uses. Confirm via `git log --oneline -20`.\n"
+            "Many repos here use an owner-prefix convention: {Owner}feat/fix/update/refactor/test/chore(scope):.\n"
             "Body must describe what changed — function names, endpoints, behaviour. No vague messages.\n"
             "ZERO attribution trailers — no Co-Authored-By, no Claude, no AI tool mentions. Ever.\n\n"
             "QUALITY GATE — MANDATORY AFTER EVERY IMPLEMENTATION:\n"
@@ -478,3 +489,135 @@ class HitlReply(BaseModel):
 class ProjectChatRequest(BaseModel):
     message: str
     planner_mode: bool = False
+    # New: explicit persona override. Slash commands in the message (/haiku,
+    # /sonnet, /opus) take precedence over this field. planner_mode=True still
+    # maps to architect persona for backward compatibility.
+    force_persona: Optional[Literal["researcher", "git_operator", "architect"]] = None
+
+
+# ── Persona chat — RBAC + persona registry ──────────────────────────────────
+#
+# Three personas, three models. The router (backend/chat_router.py) classifies
+# each chat message into one persona; permission checks gate which intents the
+# user can actually execute. CHAT_PERSONAS is the single source of truth so
+# Fleet Config can mutate models per persona without scattering string literals.
+
+ChatPersona = Literal["researcher", "git_operator", "architect"]
+
+# Permission names used in user_permissions.permission. Implicit `git.read`
+# is granted to every authenticated user (no row needed) — the literal isn't
+# in this list because we never check it.
+CHAT_PERMISSIONS: list[str] = [
+    "git.commit",
+    "git.push",
+    "git.pr.create",
+    "git.pr.merge",
+    "fleet.dispatch",
+    "fleet.config",
+    "chat.compact",
+]
+
+# Coarse intents the router emits. Each maps to either None (no special
+# permission beyond persona baseline) or a CHAT_PERMISSIONS entry.
+INTENT_PERMISSIONS: dict[str, Optional[str]] = {
+    "read":         None,
+    "plan":         None,
+    "quick_patch":  None,
+    "commit":       "git.commit",
+    "push":         "git.push",
+    "pr_create":    "git.pr.create",
+    "pr_merge":     "git.pr.merge",
+    "dispatch":     "fleet.dispatch",
+    "git_other":    "git.commit",  # any other git_operator turn — minimum bar
+}
+
+# Verbs that flip a git_operator turn into confirm-required mode. Detected by
+# substring match (case-insensitive) on the operator's message. Erring on the
+# side of confirming an extra read-only command is much cheaper than missing
+# a destructive one.
+DESTRUCTIVE_VERBS: list[str] = [
+    "merge", "push", "force-push", "force push",
+    "delete branch", "delete remote",
+    "reset --hard", "rm ", "rm -",
+    "drop table", "truncate",
+    "revert",
+]
+
+# Per-persona policy. `model`, `allowed_tools`, and `permission_mode` are
+# passed straight to claude_code_sdk.ClaudeCodeOptions. `requires_confirm` is
+# the persona-wide flag; the router still consults DESTRUCTIVE_VERBS before
+# actually pausing for confirmation.
+CHAT_PERSONAS: dict[str, dict] = {
+    "researcher": {
+        "model": "claude-haiku-4-5-20251001",
+        "allowed_tools": ["Read", "Glob", "Grep"],
+        "permission_mode": "default",
+        "max_turns": 4,
+        "requires_confirm": False,
+        "baseline_permission": None,  # implicit git.read
+        "system_prompt_extra": (
+            "You are the **Researcher** persona of the DevFleet chat. "
+            "Fetch information, read code, explain. "
+            "You CANNOT modify files, push, merge, or run arbitrary shell. "
+            "If the user asks for an action, suggest invoking /sonnet (git ops) or /opus (plan)."
+        ),
+    },
+    "git_operator": {
+        "model": "claude-sonnet-4-6",
+        "allowed_tools": ["Read", "Glob", "Grep", "Bash"],
+        "permission_mode": "default",
+        "max_turns": 10,
+        "requires_confirm": True,
+        "baseline_permission": "git.commit",
+        "system_prompt_extra": (
+            "You are the **Git Operator** persona. You execute chained git/`gh` "
+            "operations on the operator's behalf.\n\n"
+            "HARD RULES (never violate):\n"
+            "1. ONLY run `git` or `gh` commands via Bash. Refuse anything else.\n"
+            "2. Before any destructive operation (push, merge, force-push, reset --hard, "
+            "   delete branch), call the `ask_human` tool with the exact command + a one-line "
+            "   diff summary. Do NOT run the command until ask_human returns a 'Human replied: approve'.\n"
+            "3. Never use `--no-verify`, `push --force` on `main`/`master`, or `gh pr merge --admin`. "
+            "   Refuse and explain.\n"
+            "4. Follow the project's commit attribution rules from CLAUDE.md — no AI co-author trailers."
+        ),
+    },
+    "architect": {
+        "model": "claude-opus-4-7",
+        "allowed_tools": ["Read", "Glob", "Grep"],
+        "permission_mode": "default",
+        "max_turns": 8,
+        "requires_confirm": False,
+        "baseline_permission": None,
+        "system_prompt_extra": (
+            "You are the **Architect** persona — Opus. Plans and quick patches.\n\n"
+            "For plans, output structured markdown (Context / Phases / Acceptance Criteria / "
+            "Risks / Files Touched).\n"
+            "For quick patches, output a single ```patch``` fence with a unified diff the "
+            "operator can `git apply` manually. NEVER execute — you are read-only."
+        ),
+    },
+}
+
+
+# Request bodies for the new admin/auth endpoints.
+
+class GitHubTokenSet(BaseModel):
+    token: str = Field(..., min_length=20, max_length=255)
+    github_username: str = ""
+
+
+class UserPermissionGrant(BaseModel):
+    permission: str
+
+    def matches_known(self) -> bool:
+        return self.permission in CHAT_PERMISSIONS
+
+
+class ChatActionConfirm(BaseModel):
+    decision: Literal["approve", "deny"]
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=72)
+    new_password: str = Field(..., min_length=1, max_length=72)

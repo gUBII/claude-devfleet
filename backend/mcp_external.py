@@ -551,34 +551,29 @@ async def _list_missions(args: dict, conn) -> dict:
 async def _cancel_mission(args: dict, conn) -> dict:
     mid = args["mission_id"]
 
-    # Find running session
+    # Find running session. The SDK engine runs in-process and has no OS pid to track,
+    # so we identify the session by id alone and rely on sdk_engine.cancel_session for
+    # the cooperative shutdown signal.
     cur = await conn.execute(
-        "SELECT id, pid FROM agent_sessions WHERE mission_id = ? AND status = 'running' ORDER BY started_at DESC LIMIT 1",
+        "SELECT id FROM agent_sessions WHERE mission_id = ? AND status = 'running' "
+        "ORDER BY started_at DESC LIMIT 1",
         (mid,),
     )
     session = await cur.fetchone()
     if not session:
         return {"error": f"No running session for mission {mid}"}
 
-    session = dict(session)
-    sid = session["id"]
+    sid = dict(session)["id"]
 
-    # Try to cancel the process
+    # Cooperative cancel — SDK iterator exits on next yield once status is flipped to
+    # cancelled. Any exception here still falls through to the DB updates so the
+    # mission and session aren't left in 'running' on a transient failure.
     try:
         from sdk_engine import cancel_session
         await cancel_session(sid)
-    except Exception as e:
-        log.warning(f"cancel_session failed for {sid}: {e}")
-        # Fallback: kill PID if available
-        pid = session.get("pid")
-        if pid:
-            try:
-                import signal
-                os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+    except Exception as exc:
+        log.warning("cancel_session failed for %s: %s", sid, exc)
 
-    # Update status
     await conn.execute("UPDATE agent_sessions SET status = 'cancelled' WHERE id = ?", (sid,))
     await conn.execute("UPDATE missions SET status = 'failed' WHERE id = ?", (mid,))
     await conn.commit()

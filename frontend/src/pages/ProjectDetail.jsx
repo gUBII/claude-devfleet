@@ -135,6 +135,7 @@ export default function ProjectDetail({ id, navigate }) {
           projectId={id}
           projectName={project.name}
           onClose={() => setShowBot(false)}
+          navigate={navigate}
         />
       )}
 

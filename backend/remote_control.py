@@ -90,7 +90,20 @@ def _build_mission_context(mission: dict, agent_progress: str = "") -> str:
         ]
 
     parts.append(_MISSION_MARKER_END)
-    return "\n".join(parts)
+    # Defensive: any mission field that comes through as bytes (e.g. from a
+    # subprocess.check_output without text=True, or a legacy BLOB column) would
+    # crash str.join with "sequence item N: expected str instance, bytes found".
+    # Coerce every part to str so this whole bug class is impossible.
+    return "\n".join(_coerce_str(p) for p in parts)
+
+
+def _coerce_str(value) -> str:
+    """Return value as str. Decode bytes with utf-8/replace; stringify others."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return "" if value is None else str(value)
 
 
 def _inject_mission_context(work_dir: str, mission: dict, agent_progress: str = "") -> None:
@@ -199,11 +212,13 @@ class RemoteSession:
         """Start remote-control process and wait for URL."""
         log.info("Starting remote-control for session %s in %s", self.session_id, self.work_dir)
 
-        # Inject mission context into CLAUDE.md so the remote session has it
+        # Inject mission context into CLAUDE.md so the remote session has it.
+        # log.exception (not warning) so the stack trace is recorded — failures
+        # here have shipped without one and made root-cause hunts painful.
         try:
             _inject_mission_context(self.work_dir, self.mission, self.agent_progress)
-        except Exception as e:
-            log.warning("Failed to inject mission context: %s", e)
+        except Exception:
+            log.exception("Failed to inject mission context for session %s", self.session_id)
 
         # Strip API key / SDK env vars so the CLI uses OAuth login instead.
         # Remote-control requires OAuth auth — API keys don't have access.

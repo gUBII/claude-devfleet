@@ -57,6 +57,7 @@ async def _find_eligible_missions(lane_capacity: dict[str, int]) -> list[dict]:
                JOIN projects p ON p.id = m.project_id
                WHERE m.auto_dispatch = 1
                  AND m.status = 'draft'
+                 AND COALESCE(m.is_chat_turn, 0) = 0
                  AND NOT EXISTS (
                    SELECT 1 FROM json_each(m.depends_on) dep
                    WHERE dep.value NOT IN (

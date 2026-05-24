@@ -19,14 +19,20 @@ from datetime import datetime, timezone
 
 import db
 
-# How often to fetch origin/dev for all registered git projects (seconds)
+# How often to refresh remote-tracking refs for all registered git projects (seconds)
 _GIT_SYNC_INTERVAL = int(os.environ.get("DEVFLEET_GIT_SYNC_INTERVAL", "300"))  # 5 min default
 _git_sync_task: asyncio.Task | None = None
 
 log = logging.getLogger("devfleet.scheduler")
 
 _scheduler_task: asyncio.Task | None = None
+_chat_compactor_task: asyncio.Task | None = None
 CHECK_INTERVAL = int(os.environ.get("DEVFLEET_SCHEDULER_INTERVAL", "60"))
+# Cron expression for the daily chat compaction tick (UTC). Default = 03:00.
+CHAT_COMPACT_CRON = os.environ.get("DEVFLEET_CHAT_COMPACT_CRON", "0 3 * * *")
+# Most-recent minute the compactor fired in, so we don't re-trigger every
+# scheduler tick inside the matching minute.
+_chat_compact_last_minute: str | None = None
 
 # Lightweight cron matching — no external dependency needed
 # Supports: minute hour day_of_month month day_of_week
@@ -174,11 +180,61 @@ async def _scheduler_loop():
         await asyncio.sleep(CHECK_INTERVAL)
 
 
+async def _check_chat_compaction():
+    """If the current minute matches DEVFLEET_CHAT_COMPACT_CRON and we
+    haven't already fired this minute, run compact_yesterday for every
+    project. Same per-minute-dedup shape as _check_schedules."""
+    global _chat_compact_last_minute
+
+    if not cron_matches_now(CHAT_COMPACT_CRON):
+        return
+
+    now_minute = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+    if _chat_compact_last_minute == now_minute:
+        return
+    _chat_compact_last_minute = now_minute
+
+    log.info("Chat compaction tick — cron=%s minute=%s", CHAT_COMPACT_CRON, now_minute)
+    try:
+        import chat_compactor
+        results = await chat_compactor.compact_all_projects()
+        compacted = sum(1 for r in results if r.get("status") == "compacted")
+        skipped = sum(1 for r in results if r.get("status") == "skipped")
+        errors = sum(1 for r in results if r.get("status") == "error")
+        log.info(
+            "Chat compaction done — projects=%d compacted=%d skipped=%d errors=%d",
+            len(results), compacted, skipped, errors,
+        )
+    except Exception as e:
+        log.exception("Chat compaction tick failed: %s", e)
+
+
+async def _chat_compactor_loop():
+    """Background loop that checks the chat-compaction cron every minute."""
+    log.info(
+        "Chat compactor loop started (cron=%s, checking every %ds)",
+        CHAT_COMPACT_CRON, CHECK_INTERVAL,
+    )
+    while True:
+        try:
+            await _check_chat_compaction()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.error("Chat compactor loop error: %s", e)
+        await asyncio.sleep(CHECK_INTERVAL)
+
+
 async def _fetch_project(path: str) -> None:
-    """Run git fetch origin main for a single project path."""
+    """Refresh all remote-tracking refs for a single project path.
+
+    Project-agnostic: each repo decides its own base branch. We just keep
+    remote refs current; agents discover the right branch from the project's
+    CI/CD protocol doc or `git symbolic-ref refs/remotes/origin/HEAD`.
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
-            "git", "fetch", "origin", "main",
+            "git", "fetch", "origin",
             cwd=path,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
@@ -187,7 +243,7 @@ async def _fetch_project(path: str) -> None:
         if proc.returncode != 0:
             log.warning("git fetch failed for %s: %s", path, stderr.decode().strip()[:200])
         else:
-            log.debug("git fetch origin dev OK: %s", path)
+            log.debug("git fetch origin OK: %s", path)
     except asyncio.TimeoutError:
         log.warning("git fetch timed out for %s", path)
     except Exception as e:
@@ -195,7 +251,7 @@ async def _fetch_project(path: str) -> None:
 
 
 async def _git_sync_loop():
-    """Periodically fetch origin/dev for all registered git projects."""
+    """Periodically refresh remote-tracking refs for all registered git projects."""
     log.info("Git sync loop started (every %ds)", _GIT_SYNC_INTERVAL)
     while True:
         await asyncio.sleep(_GIT_SYNC_INTERVAL)
@@ -208,7 +264,7 @@ async def _git_sync_loop():
 
             paths = [r["path"] for r in rows if r["path"] and os.path.isdir(os.path.join(r["path"], ".git"))]
             if paths:
-                log.info("Git sync: fetching origin/dev for %d project(s)", len(paths))
+                log.info("Git sync: fetching origin refs for %d project(s)", len(paths))
                 await asyncio.gather(*[_fetch_project(p) for p in paths], return_exceptions=True)
         except asyncio.CancelledError:
             raise
@@ -217,19 +273,20 @@ async def _git_sync_loop():
 
 
 async def start_scheduler():
-    """Start the scheduler and git sync background tasks."""
-    global _scheduler_task, _git_sync_task
+    """Start the scheduler, git sync, and chat compactor background tasks."""
+    global _scheduler_task, _git_sync_task, _chat_compactor_task
     if _scheduler_task and not _scheduler_task.done():
         return
     _scheduler_task = asyncio.create_task(_scheduler_loop())
     _git_sync_task = asyncio.create_task(_git_sync_loop())
+    _chat_compactor_task = asyncio.create_task(_chat_compactor_loop())
     log.info("Git sync task started (interval: %ds)", _GIT_SYNC_INTERVAL)
 
 
 async def stop_scheduler():
-    """Stop the scheduler and git sync tasks."""
-    global _scheduler_task, _git_sync_task
-    for task in (_scheduler_task, _git_sync_task):
+    """Stop the scheduler, git sync, and chat compactor tasks."""
+    global _scheduler_task, _git_sync_task, _chat_compactor_task
+    for task in (_scheduler_task, _git_sync_task, _chat_compactor_task):
         if task and not task.done():
             task.cancel()
             try:
@@ -238,6 +295,7 @@ async def stop_scheduler():
                 pass
     _scheduler_task = None
     _git_sync_task = None
+    _chat_compactor_task = None
 
 
 def get_scheduler_status() -> dict:

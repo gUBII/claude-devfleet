@@ -267,18 +267,36 @@ export const listUsers = () => request('/auth/users');
 export const hitlReply = (sessionId, reply) =>
   request(`/sessions/${sessionId}/hitl-reply`, { method: 'POST', body: JSON.stringify({ reply }) });
 
+// ── Account ───────────────────────────────────────────────────────────────────
+export const changePassword = ({ current_password, new_password }) =>
+  request('/auth/me/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ current_password, new_password }),
+  });
+
 // ── Project Bot (Moofasa) ─────────────────────────────────────────────────────
 export const getBotHistory = (projectId) => request(`/projects/${projectId}/bot-history`);
 
-export function projectChat(projectId, message, { planner_mode = false, onText, onDone, onError, onPlanMeta } = {}) {
+export function projectChat(projectId, message, {
+  planner_mode = false,
+  force_persona = null,
+  onText,
+  onDone,
+  onError,
+  onPlanMeta,
+  onPersona,
+  onSessionHandoff,
+} = {}) {
   const token = localStorage.getItem('devfleet_token') || '';
+  const body = { message, planner_mode };
+  if (force_persona) body.force_persona = force_persona;
   fetch(`${API}/projects/${projectId}/chat`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ message, planner_mode }),
+    body: JSON.stringify(body),
   }).then(async (res) => {
     if (!res.ok) { onError?.('Chat request failed'); return; }
     const reader = res.body.getReader();
@@ -296,6 +314,8 @@ export function projectChat(projectId, message, { planner_mode = false, onText, 
           const data = JSON.parse(line.slice(6));
           if (data.type === 'text') onText?.(data.text);
           else if (data.type === 'plan_meta') onPlanMeta?.(data);
+          else if (data.type === 'persona') onPersona?.(data);
+          else if (data.type === 'session_handoff') onSessionHandoff?.(data);
           else if (data.type === 'done') onDone?.();
           else if (data.type === 'error') onError?.(data.text);
         } catch {}

@@ -277,12 +277,88 @@ async def init_db():
             # v11: Moofasa planner mode — mark which assistant rows are plans for context compaction
             "ALTER TABLE project_bot_history ADD COLUMN is_plan INTEGER DEFAULT 0",
             "ALTER TABLE project_bot_history ADD COLUMN plan_title TEXT DEFAULT ''",
+            # v12: persona chat + RBAC + encrypted GH tokens.
+            # github_token already exists in some prod DBs as an out-of-band addition;
+            # ensure it's tracked here, then add the encrypted twin we read from going forward.
+            "ALTER TABLE users ADD COLUMN github_token TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN github_token_encrypted TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN github_username TEXT DEFAULT ''",
+            "ALTER TABLE project_bot_history ADD COLUMN user_id TEXT DEFAULT ''",
+            "ALTER TABLE project_bot_history ADD COLUMN persona TEXT DEFAULT ''",
+            # Persisted handoff target so the "Open Live Agent →" CTA survives
+            # page reload. Backend sets this when the assistant turn is a
+            # git_operator handoff; empty for inline researcher/architect rows.
+            "ALTER TABLE project_bot_history ADD COLUMN handoff_session_id TEXT DEFAULT ''",
+            # is_chat_turn lets the mission watcher / board hide synthetic git_operator
+            # chat turns from operator-facing mission lists.
+            "ALTER TABLE missions ADD COLUMN is_chat_turn INTEGER DEFAULT 0",
+            "CREATE TABLE IF NOT EXISTS chat_actions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "project_id TEXT NOT NULL, "
+            "user_id TEXT NOT NULL, "
+            "persona TEXT NOT NULL, "
+            "intent TEXT NOT NULL, "
+            "command TEXT DEFAULT '', "
+            "status TEXT NOT NULL, "
+            "data TEXT DEFAULT '{}', "
+            "session_id TEXT, "
+            "created_at TEXT DEFAULT (datetime('now')))",
+            "CREATE INDEX IF NOT EXISTS idx_chat_actions_project ON chat_actions(project_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_chat_actions_user ON chat_actions(user_id, created_at DESC)",
+            "CREATE TABLE IF NOT EXISTS chat_summaries ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "project_id TEXT NOT NULL, "
+            "summary_date TEXT NOT NULL, "
+            "summary TEXT NOT NULL, "
+            "message_count INTEGER DEFAULT 0, "
+            "action_count INTEGER DEFAULT 0, "
+            "created_at TEXT DEFAULT (datetime('now')), "
+            "UNIQUE(project_id, summary_date))",
+            "CREATE TABLE IF NOT EXISTS user_permissions ("
+            "user_id TEXT NOT NULL, "
+            "permission TEXT NOT NULL, "
+            "granted_by TEXT, "
+            "granted_at TEXT DEFAULT (datetime('now')), "
+            "PRIMARY KEY (user_id, permission))",
         ]
         for migration in migrations:
             try:
                 await db.execute(migration)
             except Exception:
-                pass  # Column already exists
+                pass  # Column / table already exists
+
+        # v12 data migration: encrypt any plaintext github_token values that
+        # haven't been ported yet. Idempotent — the WHERE clause skips rows
+        # already migrated. Crypto import is deferred so failures here don't
+        # block schema setup in environments that haven't set the Fernet key
+        # yet (the encrypted column still exists, just stays empty).
+        try:
+            async with db.execute(
+                "SELECT id, github_token FROM users "
+                "WHERE github_token IS NOT NULL AND github_token != '' "
+                "AND (github_token_encrypted IS NULL OR github_token_encrypted = '')"
+            ) as cur:
+                _rows = await cur.fetchall()
+            if _rows:
+                import crypto as _crypto
+                for _row in _rows:
+                    _uid, _plain = _row[0], _row[1]
+                    try:
+                        _enc = _crypto.encrypt(_plain)
+                        await db.execute(
+                            "UPDATE users SET github_token_encrypted=? WHERE id=?",
+                            (_enc, _uid),
+                        )
+                    except Exception as _exc:
+                        import logging as _logging
+                        _logging.getLogger("devfleet").warning(
+                            "Failed to encrypt github_token for user %s: %s", _uid, _exc
+                        )
+        except Exception as _exc:
+            import logging as _logging
+            _logging.getLogger("devfleet").warning(
+                "Skipped github_token encryption migration: %s", _exc
+            )
 
         # Full re-sync of all lane fields from LANE_DEFAULTS
         # INSERT OR IGNORE seeds new lanes; UPDATE syncs capacity/model/preset/style — but NOT

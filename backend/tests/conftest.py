@@ -14,6 +14,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 # Required env vars must be set BEFORE importing auth/app modules anywhere
 os.environ.setdefault("DEVFLEET_JWT_SECRET", "test-secret-do-not-use-in-prod-only-for-pytest")
 os.environ.setdefault("DEVFLEET_ALLOWED_ORIGINS", "*")
+# Deterministic test Fernet key. NOT for production use. Generated via
+# Fernet.generate_key(); same shape (32 url-safe-b64 bytes) as the real key.
+os.environ.setdefault(
+    "DEVFLEET_FERNET_KEY", "__X8JO5yCVC_-lOwTC1a9Zn2QTsraiyp0mEY9WOjxcU="
+)
 
 
 @pytest.fixture(scope="session")

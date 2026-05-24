@@ -655,7 +655,7 @@ async def _run_agent(
                 _broadcast(session_id, {
                     "type": "usage",
                     "usage": {
-                        "input_tokens": billable_input,
+                        "input_tokens": input_t,
                         "output_tokens": output_t,
                         "cache_read_tokens": cache_read_t,
                         "cache_creation_tokens": cache_create_t,

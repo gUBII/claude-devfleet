@@ -11,12 +11,67 @@ function parseMissionBlock(content) {
   try { return JSON.parse(m[1]); } catch { return null; }
 }
 
-function MessageContent({ msg, projectId, onCreateMission }) {
+const PERSONA_META = {
+  researcher: { label: 'Researcher', model: 'Haiku', color: '#5bb8a6' },
+  git_operator: { label: 'Git Operator', model: 'Sonnet', color: '#d49a3a' },
+  architect: { label: 'Architect', model: 'Opus', color: '#7a6cd0' },
+};
+
+function PersonaBadge({ persona }) {
+  const meta = PERSONA_META[persona];
+  if (!meta) return null;
+  return (
+    <span
+      title={`${meta.label} (${meta.model})`}
+      style={{
+        display: 'inline-block',
+        fontSize: 10,
+        fontWeight: 600,
+        textTransform: 'uppercase',
+        letterSpacing: 0.4,
+        padding: '2px 6px',
+        marginRight: 6,
+        borderRadius: 4,
+        color: meta.color,
+        border: `1px solid ${meta.color}55`,
+        background: `${meta.color}1a`,
+      }}
+    >
+      {meta.label}
+    </span>
+  );
+}
+
+function HandoffCard({ handoff, onOpen }) {
+  return (
+    <div className="moofasa-draft">
+      <div className="moofasa-draft__label">Git Operator handoff</div>
+      <div className="moofasa-draft__criteria">
+        This turn runs as an agent session so you can watch tool calls and approve
+        destructive operations in the Live Agent view.
+      </div>
+      <button
+        className="btn btn-primary"
+        style={{ fontSize: 12, padding: '5px 12px' }}
+        onClick={() => onOpen(handoff.session_id)}
+      >
+        Open Live Agent →
+      </button>
+    </div>
+  );
+}
+
+function MessageContent({ msg, projectId, onCreateMission, onOpenSession }) {
   const draft = parseMissionBlock(msg.content);
   const displayText = msg.content.replace(/```mission[\s\S]*?```/g, '').trim();
   const isAssistant = msg.role === 'assistant';
   return (
     <>
+      {isAssistant && msg.persona && (
+        <div style={{ marginBottom: 6 }}>
+          <PersonaBadge persona={msg.persona} />
+        </div>
+      )}
       {displayText && (
         isAssistant ? (
           <div className="moofasa-markdown">
@@ -42,6 +97,9 @@ function MessageContent({ msg, projectId, onCreateMission }) {
           </button>
         </div>
       )}
+      {msg.handoff && (
+        <HandoffCard handoff={msg.handoff} onOpen={onOpenSession} />
+      )}
       {msg.is_plan && msg.id && (
         <PlanActions projectId={projectId} planId={msg.id} planTitle={msg.plan_title} />
       )}
@@ -49,7 +107,7 @@ function MessageContent({ msg, projectId, onCreateMission }) {
   );
 }
 
-export default function ProjectBot({ projectId, projectName, onClose }) {
+export default function ProjectBot({ projectId, projectName, onClose, navigate }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
@@ -70,9 +128,13 @@ export default function ProjectBot({ projectId, projectName, onClose }) {
           setMessages(rows.map(r => ({
             id: r.id,
             role: r.role,
-            content: r.content,
+            content: r.handoff_session_id ? '' : r.content,
             is_plan: !!r.is_plan,
             plan_title: r.plan_title,
+            persona: r.persona || null,
+            handoff: r.handoff_session_id
+              ? { session_id: r.handoff_session_id }
+              : undefined,
           })));
         }
       })
@@ -107,13 +169,33 @@ export default function ProjectBot({ projectId, projectName, onClose }) {
     let botMsg = '';
     setMessages(prev => [...prev, { role: 'assistant', content: '', _streaming: true }]);
 
+    let currentPersona = null;
+    let handoff = null;
+
     projectChat(projectId, text, {
       planner_mode: wasPlanner,
+      onPersona: (data) => {
+        currentPersona = data.persona;
+        setMessages(prev => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          updated[updated.length - 1] = { ...last, persona: currentPersona };
+          return updated;
+        });
+      },
+      onSessionHandoff: (data) => {
+        handoff = data;
+      },
       onText: (chunk) => {
         botMsg += chunk;
         setMessages(prev => {
           const updated = [...prev];
-          updated[updated.length - 1] = { role: 'assistant', content: botMsg, _streaming: true };
+          updated[updated.length - 1] = {
+            role: 'assistant',
+            content: botMsg,
+            persona: currentPersona,
+            _streaming: true,
+          };
           return updated;
         });
       },
@@ -135,7 +217,13 @@ export default function ProjectBot({ projectId, projectName, onClose }) {
         setMessages(prev => {
           const updated = [...prev];
           const last = updated[updated.length - 1];
-          updated[updated.length - 1] = { ...last, content: botMsg, _streaming: false };
+          updated[updated.length - 1] = {
+            ...last,
+            content: handoff ? '' : botMsg,
+            persona: currentPersona,
+            handoff: handoff || undefined,
+            _streaming: false,
+          };
           return updated;
         });
         requestAnimationFrame(() => inputRef.current?.focus());
@@ -193,6 +281,7 @@ export default function ProjectBot({ projectId, projectName, onClose }) {
           >
             {msg._streaming ? (
               <span style={{ opacity: 0.92 }}>
+                {msg.persona && <PersonaBadge persona={msg.persona} />}
                 {msg.content}
                 <span className="moofasa-cursor" />
               </span>
@@ -201,6 +290,7 @@ export default function ProjectBot({ projectId, projectName, onClose }) {
                 msg={msg}
                 projectId={projectId}
                 onCreateMission={handleCreateMission}
+                onOpenSession={(sid) => navigate?.('live', sid)}
               />
             )}
           </div>
@@ -226,6 +316,15 @@ export default function ProjectBot({ projectId, projectName, onClose }) {
           </label>
           {plannerMode && (
             <span className="moofasa-toggler__cost">Opus · slower · costlier</span>
+          )}
+          {!plannerMode && (
+            <span
+              className="moofasa-toggler__cost"
+              title="Prefix your message with a slash to pick a persona"
+              style={{ opacity: 0.6 }}
+            >
+              /haiku · /sonnet · /opus
+            </span>
           )}
         </div>
         <div className="moofasa-panel__inputrow">

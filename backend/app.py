@@ -19,7 +19,8 @@ from models import (ProjectCreate, ProjectUpdate, MissionCreate, MissionUpdate,
                     ServiceCreate, ServiceUpdate, IncidentCreate, IncidentUpdate,
                     McpServerCreate, CeilingUpdate,
                     HitlAskRequest, HitlReply, ProjectChatRequest,
-                    GitHubTokenSet, UserPermissionGrant, CHAT_PERMISSIONS)
+                    GitHubTokenSet, UserPermissionGrant, CHAT_PERMISSIONS,
+                    ChangePasswordRequest)
 import health_checker
 import mission_watcher
 import scheduler
@@ -623,21 +624,96 @@ async def project_chat(pid: str, body: ProjectChatRequest, request: Request):
 
     user_id = user.get("sub") or user.get("id") or ""
 
+    # Short-circuit if the user pasted a GitHub PAT: store it encrypted,
+    # scrub the plaintext from history, ack — never reaches any persona.
+    import gh_token_paste
+    pasted_token = gh_token_paste.find_token(body.message)
+
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall("SELECT * FROM projects WHERE id=?", (pid,))
         if not rows:
             raise HTTPException(404, "Project not found")
         project = dict(rows[0])
+        # Persist the user message — redact first if a token slipped in.
+        persisted_message = (
+            gh_token_paste.redact(body.message) if pasted_token else body.message
+        )
         await conn.execute(
             "INSERT INTO project_bot_history "
             "(project_id, role, content, user_id, persona) "
             "VALUES (?, 'user', ?, ?, 'user')",
-            (pid, body.message, user_id),
+            (pid, persisted_message, user_id),
         )
         await conn.commit()
     finally:
         await conn.close()
+
+    if pasted_token:
+        import auth
+        import chat_audit
+        try:
+            await auth.set_github_token(user_id, pasted_token)
+        except Exception:
+            logging.getLogger("devfleet").exception(
+                "Failed to save pasted GitHub token for user %s", user_id
+            )
+            await chat_audit.log_action(
+                pid, user_id, "system", "token_save_failed",
+                status="failed", data={},
+            )
+
+            async def _err():
+                yield "data: " + json.dumps({
+                    "type": "error",
+                    "text": "Failed to save token — try again or use Fleet Config.",
+                }) + "\n\n"
+                yield "data: " + json.dumps({"type": "done"}) + "\n\n"
+
+            return StreamingResponse(
+                _err(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache, no-store, no-transform",
+                         "X-Accel-Buffering": "no"},
+            )
+
+        await chat_audit.log_action(
+            pid, user_id, "system", "token_saved",
+            status="completed", data={"prefix": pasted_token[:8] + "…"},
+        )
+
+        confirmation = (
+            "GitHub token saved (encrypted at rest). Your message has been "
+            "scrubbed from chat history. You can now retry your git command."
+        )
+        conn = await db.get_db()
+        try:
+            await conn.execute(
+                "INSERT INTO project_bot_history "
+                "(project_id, role, content, user_id, persona) "
+                "VALUES (?, 'assistant', ?, ?, 'system')",
+                (pid, confirmation, user_id),
+            )
+            await conn.commit()
+        finally:
+            await conn.close()
+
+        async def _confirm_stream():
+            yield "data: " + json.dumps({
+                "type": "persona", "persona": "system",
+                "intent": "token_saved", "requires_confirm": False,
+            }) + "\n\n"
+            yield "data: " + json.dumps({
+                "type": "text", "text": confirmation,
+            }) + "\n\n"
+            yield "data: " + json.dumps({"type": "done"}) + "\n\n"
+
+        return StreamingResponse(
+            _confirm_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache, no-store, no-transform",
+                     "X-Accel-Buffering": "no"},
+        )
 
     from project_bot import stream_bot_response
     return StreamingResponse(
@@ -662,7 +738,9 @@ async def get_bot_history(pid: str, request: Request):
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall(
-            "SELECT id, role, content, created_at, is_plan, plan_title FROM project_bot_history WHERE project_id=? ORDER BY created_at ASC LIMIT 100",
+            "SELECT id, role, content, created_at, is_plan, plan_title, persona, "
+            "handoff_session_id "
+            "FROM project_bot_history WHERE project_id=? ORDER BY created_at ASC LIMIT 100",
             (pid,),
         )
         return [dict(r) for r in rows]
@@ -807,6 +885,39 @@ async def clear_my_github_token(request: Request):
     import auth
     await auth.clear_github_token(user["sub"])
     return None
+
+
+@app.post("/api/auth/me/change-password")
+async def change_my_password(body: ChangePasswordRequest, request: Request):
+    """Change the caller's password. Requires the current password — never
+    relies on JWT alone, so a leaked token can't be used to lock the user out."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    import auth
+    user_id = user.get("sub") or user.get("id") or ""
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT password_hash FROM users WHERE id=?", (user_id,)
+        )
+        if not rows:
+            raise HTTPException(404, "User not found")
+        current_hash = dict(rows[0]).get("password_hash") or ""
+        if not auth.verify_password(body.current_password, current_hash):
+            raise HTTPException(403, "Current password incorrect")
+        try:
+            new_hash = auth.hash_password(body.new_password)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        await conn.execute(
+            "UPDATE users SET password_hash=? WHERE id=?",
+            (new_hash, user_id),
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+    return {"ok": True}
 
 
 @app.get("/api/auth/me/github-token")
