@@ -142,6 +142,76 @@ async def test_run_inline_yields_text_events(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_inline_does_not_double_emit_via_result_message(monkeypatch):
+    """SDK emits text once via AssistantMessage TextBlocks and again via the
+    terminal ResultMessage.result. Inline persona must only stream the blocks;
+    the final ResultMessage is metadata, not a second copy of the reply."""
+    from chat_personas import run_inline_persona
+    import claude_code_sdk
+    from claude_code_sdk.types import TextBlock
+
+    class AssistantStub:
+        def __init__(self, text: str):
+            self.content = [TextBlock(text=text)]
+
+    class ResultStub:
+        # No `content`, only `result` — mirrors the SDK's terminal message
+        def __init__(self, text: str):
+            self.result = text
+
+    async def fake_query(prompt, options):
+        yield AssistantStub("hello ")
+        yield AssistantStub("world")
+        yield ResultStub("hello world")  # full reply again — must NOT be re-yielded
+
+    monkeypatch.setattr("claude_code_sdk.query", fake_query)
+
+    events = []
+    async for ev in run_inline_persona(
+        "researcher",
+        {"id": "p1", "name": "x", "path": "/tmp", "description": ""},
+        {"email": "a@b"}, "say hello", [],
+    ):
+        events.append(ev)
+
+    text_events = [e for e in events if e["type"] == "text"]
+    assert len(text_events) == 2, (
+        f"expected only the 2 TextBlocks, got {len(text_events)} "
+        f"(ResultMessage.result was double-yielded)"
+    )
+    assert "".join(e["text"] for e in text_events) == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_run_inline_falls_back_to_result_when_no_text_blocks(monkeypatch):
+    """If the SDK happens to skip TextBlocks and only emits a ResultMessage
+    (rare lightweight path), we must still surface the reply — otherwise the
+    chat goes silent."""
+    from chat_personas import run_inline_persona
+
+    class ResultOnlyStub:
+        def __init__(self, text: str):
+            self.result = text
+
+    async def fake_query(prompt, options):
+        yield ResultOnlyStub("just the result")
+
+    monkeypatch.setattr("claude_code_sdk.query", fake_query)
+
+    events = []
+    async for ev in run_inline_persona(
+        "researcher",
+        {"id": "p1", "name": "x", "path": "/tmp", "description": ""},
+        {"email": "a@b"}, "hi", [],
+    ):
+        events.append(ev)
+
+    text_events = [e for e in events if e["type"] == "text"]
+    assert len(text_events) == 1
+    assert text_events[0]["text"] == "just the result"
+
+
+@pytest.mark.asyncio
 async def test_run_inline_emits_error_on_exception(monkeypatch):
     """If the SDK call raises, an error event must be yielded — the chat
     stream should never hang or expose a stack trace."""

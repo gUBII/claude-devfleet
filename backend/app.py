@@ -738,9 +738,12 @@ async def get_bot_history(pid: str, request: Request):
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall(
-            "SELECT id, role, content, created_at, is_plan, plan_title, persona, "
-            "handoff_session_id "
-            "FROM project_bot_history WHERE project_id=? ORDER BY created_at ASC LIMIT 100",
+            "SELECT h.id, h.role, h.content, h.created_at, h.is_plan, h.plan_title, "
+            "h.persona, h.handoff_session_id, h.user_id, "
+            "COALESCE(u.email, '') AS user_email "
+            "FROM project_bot_history h "
+            "LEFT JOIN users u ON u.id = h.user_id "
+            "WHERE h.project_id=? ORDER BY h.created_at ASC LIMIT 100",
             (pid,),
         )
         return [dict(r) for r in rows]
