@@ -105,6 +105,22 @@ async def create_worktree(
                 "Worktree git identity set: %s <%s>", gi_name, gi_email
             )
 
+        # Credential helper for HTTPS remotes. SSH remotes ignore this entirely.
+        # GH_TOKEN is read from the agent process env at the moment `git push`
+        # runs — set by sdk_engine when dispatching with a per-user PAT.
+        # Scoped to https://github.com so other helpers (e.g. macOS keychain
+        # for unrelated hosts) keep working.
+        _, _, _ = await _run(
+            ["git", "config", "--local", "credential.https://github.com.helper", ""],
+            worktree_path,
+        )
+        await _run(
+            ["git", "config", "--local", "--add",
+             "credential.https://github.com.helper",
+             "!f() { echo username=x-access-token; echo \"password=${GH_TOKEN:-}\"; }; f"],
+            worktree_path,
+        )
+
     # Pre-warm node_modules so the agent doesn't OOM during install inside the session.
     # pnpm install runs here (pre-agent) where a failure is cheap and clearly scoped.
     lock_file = os.path.join(worktree_path, "pnpm-lock.yaml")

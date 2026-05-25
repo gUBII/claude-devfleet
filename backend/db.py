@@ -368,6 +368,56 @@ async def init_db():
                 "Skipped github_token encryption migration: %s", _exc
             )
 
+        # v13 data migration: backfill identity columns for users who already
+        # have an encrypted token but pre-date the github_login column.
+        # Idempotent via the WHERE clause. Each GitHub /user call is a few
+        # hundred ms; capped at a handful of users in practice (≤ team size).
+        # Network/auth failure on any single user is logged and skipped — the
+        # row's identity stays empty and the persona prompt will nudge a
+        # re-paste.
+        try:
+            async with db.execute(
+                "SELECT id, github_token_encrypted FROM users "
+                "WHERE github_token_encrypted IS NOT NULL "
+                "AND github_token_encrypted != '' "
+                "AND (github_login IS NULL OR github_login = '')"
+            ) as cur:
+                _id_rows = await cur.fetchall()
+            if _id_rows:
+                import crypto as _crypto
+                from gh_identity import fetch_github_identity as _fetch_id
+                for _row in _id_rows:
+                    _uid, _enc = _row[0], _row[1]
+                    try:
+                        _plain = _crypto.decrypt(_enc)
+                    except Exception as _exc:
+                        import logging as _logging
+                        _logging.getLogger("devfleet").warning(
+                            "Identity backfill: decrypt failed for %s: %s",
+                            _uid, _exc,
+                        )
+                        continue
+                    _ident = await _fetch_id(_plain)
+                    if _ident is None:
+                        import logging as _logging
+                        _logging.getLogger("devfleet").warning(
+                            "Identity backfill: GitHub /user failed for %s "
+                            "(token may be revoked) — leaving empty",
+                            _uid,
+                        )
+                        continue
+                    await db.execute(
+                        "UPDATE users SET github_login=?, github_name=?, "
+                        "github_noreply_email=? WHERE id=?",
+                        (_ident.login, _ident.name, _ident.noreply_email, _uid),
+                    )
+                await db.commit()
+        except Exception as _exc:
+            import logging as _logging
+            _logging.getLogger("devfleet").warning(
+                "Skipped github identity backfill: %s", _exc
+            )
+
         # Full re-sync of all lane fields from LANE_DEFAULTS
         # INSERT OR IGNORE seeds new lanes; UPDATE syncs capacity/model/preset/style — but NOT
         # append_prompt, which the user can customise via Prompt Studio and must survive restarts.
