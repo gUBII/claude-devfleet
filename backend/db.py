@@ -320,6 +320,14 @@ async def init_db():
             "granted_by TEXT, "
             "granted_at TEXT DEFAULT (datetime('now')), "
             "PRIMARY KEY (user_id, permission))",
+            # v13: GitHub identity bundle — populated from GET /user after PAT save.
+            # Used to set git config user.name/user.email per-user inside the
+            # worktree, so commits are attributed to the actual operator and
+            # pushes go out under their credential. noreply_email avoids
+            # leaking private primary emails.
+            "ALTER TABLE users ADD COLUMN github_login TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN github_name TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN github_noreply_email TEXT DEFAULT ''",
         ]
         for migration in migrations:
             try:

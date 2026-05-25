@@ -740,7 +740,8 @@ async def get_bot_history(pid: str, request: Request):
         rows = await conn.execute_fetchall(
             "SELECT h.id, h.role, h.content, h.created_at, h.is_plan, h.plan_title, "
             "h.persona, h.handoff_session_id, h.user_id, "
-            "COALESCE(u.email, '') AS user_email "
+            "COALESCE(u.email, '') AS user_email, "
+            "COALESCE(u.github_login, '') AS github_login "
             "FROM project_bot_history h "
             "LEFT JOIN users u ON u.id = h.user_id "
             "WHERE h.project_id=? ORDER BY h.created_at ASC LIMIT 100",

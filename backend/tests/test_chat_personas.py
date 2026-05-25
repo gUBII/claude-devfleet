@@ -581,3 +581,36 @@ async def test_synthetic_mission_excluded_from_watcher_eligibility(tmp_db, monke
     eligible = await mission_watcher._find_eligible_missions(lane_capacity)
     eligible_ids = [m["id"] for m in eligible]
     assert result["mission_id"] not in eligible_ids
+
+
+# ─── PR merge protocol prompt cadence ─────────────────────────────────────
+
+
+def test_git_operator_prompt_declares_pr_merge_protocol():
+    """The persona prompt MUST spell out all six phases of the PR merge cadence.
+
+    The agent's actual output cadence depends on a real SDK conversation, so we
+    test the contract at the prompt layer: every required phase keyword is
+    present, and the prompt forbids silent execution between fetch and merge.
+    """
+    from models import CHAT_PERSONAS
+
+    prompt = CHAT_PERSONAS["git_operator"]["system_prompt_extra"]
+
+    # Six-phase cadence labels
+    assert "Phase 1" in prompt and "Fetching" in prompt
+    assert "Phase 2" in prompt and "Diff:" in prompt
+    assert "Phase 3" in prompt and "Proposed:" in prompt
+    assert "Phase 4" in prompt and "Awaiting your confirmation" in prompt
+    assert "Phase 5" in prompt and "Merging" in prompt
+    assert "Phase 6" in prompt
+
+    # Silent-execution prohibition between fetch and merge
+    assert "Silent execution" in prompt or "silent execution" in prompt.lower()
+
+    # ask_human enforcement before merge
+    assert "ask_human" in prompt
+
+    # Identity-aware: prompt must mention the worktree git config so the agent
+    # refuses to commit when identity is missing
+    assert "git config user.email" in prompt or "git config user.name" in prompt
