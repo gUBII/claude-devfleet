@@ -1471,6 +1471,47 @@ async def run_lane_critique_batch():
     return {"status": "started", "message": "Opus critique batch running in background (~30s)"}
 
 
+@app.post("/api/lanes")
+async def create_lane_endpoint(body: dict, request: Request):
+    """Create a user-defined lane. Built-in lane names are rejected (use PUT
+    to edit those). Admin-only — only operators with the `admin` role can
+    add lanes, since a new lane changes fleet-wide capacity accounting."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    if (user.get("role") or "") != "admin":
+        raise HTTPException(403, "Only admins can create lanes")
+    from lanes import create_lane, LaneValidationError
+    try:
+        return await create_lane(
+            name=body.get("name", ""),
+            icon=body.get("icon", ""),
+            max_agents=int(body.get("max_agents", 1)),
+            default_model=body.get("default_model", "claude-sonnet-4-6"),
+            tool_preset=body.get("tool_preset", "implement"),
+            color=body.get("color", "#888888"),
+        )
+    except LaneValidationError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.delete("/api/lanes/{name}")
+async def delete_lane_endpoint(name: str, request: Request):
+    """Delete a user-created lane. Built-ins are protected at the lanes layer."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    if (user.get("role") or "") != "admin":
+        raise HTTPException(403, "Only admins can delete lanes")
+    from lanes import delete_lane
+    ok, reason = await delete_lane(name)
+    if not ok:
+        # 409 for protected built-ins, 404 for missing, both convey "no"
+        # without claiming server fault.
+        raise HTTPException(409 if "built-in" in reason else 404, reason)
+    return {"status": "deleted", "name": name}
+
+
 @app.get("/api/lanes/{name}")
 async def get_lane(name: str):
     from lanes import get_one_lane

@@ -328,6 +328,10 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN github_login TEXT DEFAULT ''",
             "ALTER TABLE users ADD COLUMN github_name TEXT DEFAULT ''",
             "ALTER TABLE users ADD COLUMN github_noreply_email TEXT DEFAULT ''",
+            # v14: user-created lanes (Fleet Config "New Lane" button). Built-in
+            # lanes from LANE_DEFAULTS stay user_created=0 so the disable-on-
+            # startup guard never touches them; user lanes survive restarts.
+            "ALTER TABLE lanes ADD COLUMN user_created INTEGER DEFAULT 0",
         ]
         for migration in migrations:
             try:
@@ -423,8 +427,13 @@ async def init_db():
         # append_prompt, which the user can customise via Prompt Studio and must survive restarts.
         # Also disables lanes no longer in LANE_DEFAULTS (deprecated/renamed lanes)
         from models import LANE_DEFAULTS as _LD
+        # Disable lanes that were once in LANE_DEFAULTS but no longer are
+        # (deprecated/renamed built-ins). Excludes user-created lanes — those
+        # live independent of LANE_DEFAULTS and must survive restarts.
         await db.execute(
-            f"UPDATE lanes SET enabled=0 WHERE name NOT IN ({','.join('?' for _ in _LD)})",
+            f"UPDATE lanes SET enabled=0 "
+            f"WHERE name NOT IN ({','.join('?' for _ in _LD)}) "
+            f"AND COALESCE(user_created, 0) = 0",
             list(_LD.keys()),
         )
         for _lane_name, _policy in _LD.items():

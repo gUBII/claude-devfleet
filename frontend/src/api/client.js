@@ -241,6 +241,10 @@ export const getPlugins = () => request('/plugins');
 export const listLanes = () => request('/lanes');
 export const updateLane = (name, data) =>
   request(`/lanes/${name}`, { method: 'PUT', body: JSON.stringify(data) });
+export const createLane = (data) =>
+  request('/lanes', { method: 'POST', body: JSON.stringify(data) });
+export const deleteLane = (name) =>
+  request(`/lanes/${name}`, { method: 'DELETE' });
 
 // ── Prompt Studio ──
 export const getLanePrompt = (name) => request(`/lanes/${name}/prompt`);
