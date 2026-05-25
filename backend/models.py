@@ -490,7 +490,7 @@ class ProjectChatRequest(BaseModel):
     message: str
     planner_mode: bool = False
     # New: explicit persona override. Slash commands in the message (/haiku,
-    # /sonnet, /opus) take precedence over this field. planner_mode=True still
+    # /gitsheba, /opus) take precedence over this field. planner_mode=True still
     # maps to architect persona for backward compatibility.
     force_persona: Optional[Literal["researcher", "git_operator", "architect"]] = None
 
@@ -559,7 +559,7 @@ CHAT_PERSONAS: dict[str, dict] = {
             "You are the **Researcher** persona of the DevFleet chat. "
             "Fetch information, read code, explain. "
             "You CANNOT modify files, push, merge, or run arbitrary shell. "
-            "If the user asks for an action, suggest invoking /sonnet (git ops) or /opus (plan)."
+            "If the user asks for an action, suggest invoking /gitsheba (git ops) or /opus (plan)."
         ),
     },
     "git_operator": {

@@ -4,7 +4,8 @@ Turns a free-form operator message into a routing decision used by the chat
 endpoint to pick a persona executor and apply RBAC.
 
 Routing precedence (highest first):
-  1. Slash prefix in the message: `/haiku`, `/sonnet`, `/opus` → direct map.
+  1. Slash prefix in the message: `/haiku`, `/gitsheba` (or legacy `/sonnet`),
+     `/opus` → direct map.
   2. Explicit `force_persona` from the API body (ProjectChatRequest).
   3. Legacy `planner_mode=True` → architect.
   4. Keyword heuristic on the message text.
@@ -32,13 +33,15 @@ from models import (
 
 log = logging.getLogger("devfleet.chat_router")
 
-# Slash prefix must be the FIRST token; otherwise discussing "/sonnet" in prose
-# wouldn't accidentally route the message.
-_SLASH_RE = re.compile(r"^\s*/(haiku|sonnet|opus)\b", re.IGNORECASE)
+# Slash prefix must be the FIRST token; otherwise discussing "/gitsheba" in
+# prose wouldn't accidentally route the message. `/sonnet` is retained as a
+# legacy alias — drop it once telemetry shows zero usage.
+_SLASH_RE = re.compile(r"^\s*/(haiku|gitsheba|sonnet|opus)\b", re.IGNORECASE)
 
 _SLASH_TO_PERSONA: dict[str, ChatPersona] = {
     "haiku": "researcher",
-    "sonnet": "git_operator",
+    "gitsheba": "git_operator",
+    "sonnet": "git_operator",  # legacy alias
     "opus": "architect",
 }
 

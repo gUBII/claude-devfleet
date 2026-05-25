@@ -18,7 +18,17 @@ def test_slash_haiku_routes_to_researcher():
     assert perm is None
 
 
-def test_slash_sonnet_routes_to_git_operator():
+def test_slash_gitsheba_routes_to_git_operator():
+    from chat_router import classify
+
+    persona, _, _, _ = classify("/gitsheba show me PR status")
+    assert persona == "git_operator"
+
+
+def test_slash_sonnet_legacy_alias_still_routes_to_git_operator():
+    """`/sonnet` is the deprecated alias for `/gitsheba` — must keep working
+    so saved muscle memory and bookmarked URLs don't silently route to the
+    wrong persona."""
     from chat_router import classify
 
     persona, _, _, _ = classify("/sonnet show me PR status")
@@ -67,7 +77,8 @@ def test_slash_with_leading_whitespace():
 def test_strip_slash_prefix_removes_routing():
     from chat_router import strip_slash_prefix
 
-    assert strip_slash_prefix("/sonnet merge PR 42") == "merge PR 42"
+    assert strip_slash_prefix("/gitsheba merge PR 42") == "merge PR 42"
+    assert strip_slash_prefix("/sonnet merge PR 42") == "merge PR 42"  # legacy
     assert strip_slash_prefix("/haiku explain mission_watcher") == "explain mission_watcher"
     assert strip_slash_prefix("no slash here") == "no slash here"
 
