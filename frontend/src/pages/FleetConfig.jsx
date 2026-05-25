@@ -1,5 +1,9 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { getSystemStatus, setGlobalCeiling, listLanes, updateLane } from '../api/client';
+import {
+  getSystemStatus, setGlobalCeiling, listLanes, updateLane,
+  createLane, deleteLane,
+} from '../api/client';
+import { useAuth } from '../auth';
 
 const MODELS = [
   'claude-sonnet-4-6',
@@ -7,7 +11,9 @@ const MODELS = [
   'claude-haiku-4-5-20251001',
 ];
 
-function LaneEditor({ lane, onSave, onClose, navigate }) {
+const LANE_NAME_RE = /^[a-z][a-z0-9_]{1,30}$/;
+
+function LaneEditor({ lane, onSave, onClose, onDeleted, navigate, isAdmin }) {
   // Capacity / model / enabled only. Prompt authoring lives in Prompt Studio —
   // a single source of truth avoids divergent edits across two surfaces.
   const [form, setForm] = useState({
@@ -16,7 +22,10 @@ function LaneEditor({ lane, onSave, onClose, navigate }) {
     enabled: lane.enabled ?? true,
   });
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState(null);
+
+  const canDelete = isAdmin && lane.user_created;
 
   const handleSave = async () => {
     setSaving(true);
@@ -28,6 +37,19 @@ function LaneEditor({ lane, onSave, onClose, navigate }) {
       setError(e.message);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!window.confirm(`Delete lane '${lane.name}'? This removes its prompt and MCP tool config. This cannot be undone.`)) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      await deleteLane(lane.name);
+      if (onDeleted) onDeleted(lane.name);
+    } catch (e) {
+      setError(e.message);
+      setDeleting(false);
     }
   };
 
@@ -100,10 +122,141 @@ function LaneEditor({ lane, onSave, onClose, navigate }) {
           {error && <div className="editor-error">{error}</div>}
         </div>
 
+        <div className="lane-editor-footer" style={{ display: 'flex', justifyContent: 'space-between' }}>
+          <div>
+            {canDelete && (
+              <button
+                onClick={handleDelete}
+                disabled={deleting || saving}
+                title="Delete this user-created lane"
+                style={{
+                  background: 'transparent',
+                  color: 'var(--danger, #e54)',
+                  border: '1px solid var(--danger, #e54)',
+                  padding: '6px 12px',
+                  borderRadius: 6,
+                  cursor: deleting ? 'wait' : 'pointer',
+                  fontSize: 13,
+                }}
+              >
+                {deleting ? 'Deleting…' : '🗑  Delete Lane'}
+              </button>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn-cancel" onClick={onClose}>Cancel</button>
+            <button className="btn-save" onClick={handleSave} disabled={saving || deleting}>
+              {saving ? 'Saving…' : 'Save Changes'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NewLaneModal({ onCreated, onClose, navigate }) {
+  const [form, setForm] = useState({
+    name: '',
+    icon: '🧩',
+    max_agents: 1,
+    default_model: 'claude-sonnet-4-6',
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const nameValid = LANE_NAME_RE.test(form.name);
+  const canSave = nameValid && form.max_agents >= 1 && !saving;
+
+  const handleCreate = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const created = await createLane(form);
+      try {
+        sessionStorage.setItem('devfleet:prompt-studio:lane', created.name);
+      } catch { /* sessionStorage may be unavailable */ }
+      onCreated(created);
+      if (navigate) navigate('prompt-studio');
+    } catch (e) {
+      setError(e.message || 'Failed to create lane');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="lane-editor-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="lane-editor-modal">
+        <div className="lane-editor-header">
+          <span style={{ fontSize: '1.5rem' }}>{form.icon || '🧩'}</span>
+          <h2>New Lane</h2>
+          <button className="close-btn" onClick={onClose}>✕</button>
+        </div>
+
+        <div className="lane-editor-body">
+          <div className="field-row">
+            <label>Name</label>
+            <input
+              type="text"
+              value={form.name}
+              onChange={e => setForm(f => ({ ...f, name: e.target.value.toLowerCase() }))}
+              placeholder="docs_writer"
+              autoFocus
+            />
+            <div className="field-hint">
+              Lowercase letters, digits, underscores. Starts with a letter. e.g. <code>docs_writer</code>, <code>migrator</code>.
+              {form.name && !nameValid && (
+                <span style={{ color: 'var(--danger, #e54)', marginLeft: 8 }}>
+                  Invalid format
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="field-row">
+            <label>Icon (emoji)</label>
+            <input
+              type="text"
+              value={form.icon}
+              onChange={e => setForm(f => ({ ...f, icon: e.target.value.slice(0, 4) }))}
+              maxLength={4}
+              style={{ width: 80, fontSize: 20, textAlign: 'center' }}
+            />
+          </div>
+
+          <div className="field-row">
+            <label>Max Concurrent Agents</label>
+            <input
+              type="number"
+              min={1}
+              max={10}
+              value={form.max_agents}
+              onChange={e => setForm(f => ({ ...f, max_agents: parseInt(e.target.value) || 1 }))}
+            />
+          </div>
+
+          <div className="field-row">
+            <label>Default Model</label>
+            <select
+              value={form.default_model}
+              onChange={e => setForm(f => ({ ...f, default_model: e.target.value }))}
+            >
+              {MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+
+          <div className="field-hint" style={{ marginTop: 12, opacity: 0.7 }}>
+            System prompt starts blank — you'll be sent to Prompt Studio to author it after Save.
+          </div>
+
+          {error && <div className="editor-error">{error}</div>}
+        </div>
+
         <div className="lane-editor-footer">
           <button className="btn-cancel" onClick={onClose}>Cancel</button>
-          <button className="btn-save" onClick={handleSave} disabled={saving}>
-            {saving ? 'Saving…' : 'Save Changes'}
+          <button className="btn-save" onClick={handleCreate} disabled={!canSave}>
+            {saving ? 'Creating…' : 'Create + Author Prompt →'}
           </button>
         </div>
       </div>
@@ -156,10 +309,13 @@ function CeilingPicker({ ceiling, onChange }) {
 }
 
 export default function FleetConfig({ navigate }) {
+  const { user } = useAuth();
+  const isAdmin = (user?.role || '') === 'admin';
   const [lanes, setLanes] = useState([]);
   const [ceiling, setCeiling] = useState(0);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null);
+  const [creating, setCreating] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -190,11 +346,21 @@ export default function FleetConfig({ navigate }) {
 
   return (
     <div className="fleet-config-page">
-      <div className="fleet-config-header">
+      <div className="fleet-config-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
         <div>
           <h1>Fleet Configuration</h1>
           <p className="subtitle">{lanes.length} lanes · {totalSlots} total slots · click any lane to edit capacity &amp; model (prompt lives in Prompt Studio)</p>
         </div>
+        {isAdmin && (
+          <button
+            className="btn btn-primary"
+            onClick={() => setCreating(true)}
+            title="Create a new lane (admin only)"
+            style={{ whiteSpace: 'nowrap' }}
+          >
+            + New Lane
+          </button>
+        )}
       </div>
 
       <CeilingPicker ceiling={ceiling} onChange={setCeiling} />
@@ -235,6 +401,19 @@ export default function FleetConfig({ navigate }) {
           lane={editing}
           onSave={handleSaved}
           onClose={() => setEditing(null)}
+          onDeleted={(name) => {
+            setLanes(ls => ls.filter(l => l.name !== name));
+            setEditing(null);
+          }}
+          navigate={navigate}
+          isAdmin={isAdmin}
+        />
+      )}
+
+      {creating && (
+        <NewLaneModal
+          onCreated={() => { setCreating(false); load(); }}
+          onClose={() => setCreating(false)}
           navigate={navigate}
         />
       )}
