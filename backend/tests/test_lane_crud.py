@@ -146,31 +146,24 @@ async def test_user_lane_survives_init_db_reseed(app_client, tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_post_lanes_requires_admin(app_client):
+async def test_post_lanes_rejects_unauthenticated(app_client):
     client, _ = app_client
-    import auth as _auth
-
-    # Non-admin user
-    await _auth.create_user(email="u@x.local", password="Test1234!", role="user")
-    res = client.post("/api/auth/login", json={"email": "u@x.local", "password": "Test1234!"})
-    token = res.json()["access_token"]
 
     res = client.post(
         "/api/lanes",
-        json={"name": "should_fail", "max_agents": 1},
-        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "anon_lane", "max_agents": 1},
     )
-    assert res.status_code == 403
-    assert "admin" in res.json()["detail"].lower()
+    assert res.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_post_lanes_admin_creates_lane(app_client):
+async def test_post_lanes_any_authenticated_user_creates_lane(app_client):
+    """Non-admin devs can add lanes — same trust model as Prompt Studio prompts."""
     client, _ = app_client
     import auth as _auth
 
-    await _auth.create_user(email="a@x.local", password="Test1234!", role="admin")
-    res = client.post("/api/auth/login", json={"email": "a@x.local", "password": "Test1234!"})
+    await _auth.create_user(email="u@x.local", password="Test1234!", role="user")
+    res = client.post("/api/auth/login", json={"email": "u@x.local", "password": "Test1234!"})
     token = res.json()["access_token"]
 
     res = client.post(
@@ -189,8 +182,8 @@ async def test_delete_lane_endpoint_blocks_builtins(app_client):
     client, _ = app_client
     import auth as _auth
 
-    await _auth.create_user(email="a@x.local", password="Test1234!", role="admin")
-    res = client.post("/api/auth/login", json={"email": "a@x.local", "password": "Test1234!"})
+    await _auth.create_user(email="u@x.local", password="Test1234!", role="user")
+    res = client.post("/api/auth/login", json={"email": "u@x.local", "password": "Test1234!"})
     token = res.json()["access_token"]
 
     res = client.delete("/api/lanes/coder", headers={"Authorization": f"Bearer {token}"})
