@@ -62,10 +62,13 @@ function HandoffCard({ handoff, onOpen }) {
   );
 }
 
-function UserLabel({ email, currentEmail }) {
-  if (!email) return null;
+function UserLabel({ email, githubLogin, currentEmail }) {
+  if (!email && !githubLogin) return null;
   const isYou = currentEmail && email === currentEmail;
-  const display = isYou ? 'You' : email.split('@')[0];
+  const display = isYou
+    ? 'You'
+    : (githubLogin || (email ? email.split('@')[0] : ''));
+  if (!display) return null;
   return (
     <div style={{
       fontSize: 10, opacity: 0.65, marginBottom: 4,
@@ -88,7 +91,11 @@ function MessageContent({ msg, projectId, onCreateMission, onOpenSession, curren
         </div>
       )}
       {!isAssistant && (
-        <UserLabel email={msg.user_email} currentEmail={currentEmail} />
+        <UserLabel
+          email={msg.user_email}
+          githubLogin={msg.github_login}
+          currentEmail={currentEmail}
+        />
       )}
       {displayText && (
         isAssistant ? (
@@ -163,6 +170,7 @@ export default function ProjectBot({ projectId, projectName, onClose, navigate }
               plan_title: r.plan_title,
               persona: r.persona || null,
               user_email: r.user_email || null,
+              github_login: r.github_login || null,
               handoff: r.handoff_session_id
                 ? { session_id: r.handoff_session_id }
                 : undefined,

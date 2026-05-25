@@ -92,3 +92,50 @@ async def test_bot_history_returns_user_email_per_row(app_client):
     for r in rows:
         assert "user_email" in r
         assert "user_id" in r
+        assert "github_login" in r
+
+
+@pytest.mark.asyncio
+async def test_bot_history_returns_github_login_when_populated(app_client):
+    client, db_path = app_client
+    import auth as _auth
+
+    user = await _auth.create_user(
+        email="adil@devfleet.local", password="Test1234!", role="user",
+    )
+
+    # Seed identity columns directly — gh_identity fetch is mocked elsewhere.
+    async with aiosqlite.connect(db_path) as conn:
+        await conn.execute(
+            "UPDATE users SET github_login=?, github_name=?, github_noreply_email=? "
+            "WHERE id=?",
+            ("adil-mug", "Adil M",
+             "1234567+adil-mug@users.noreply.github.com", user["id"]),
+        )
+        await conn.execute(
+            "INSERT INTO projects (id, name, path) VALUES ('p2', 'Shared', '/tmp')"
+        )
+        await conn.execute(
+            "INSERT INTO project_bot_history "
+            "(project_id, role, content, user_id, persona) VALUES "
+            "('p2', 'user', 'wired', ?, 'user')",
+            (user["id"],),
+        )
+        await conn.commit()
+
+    res = client.post(
+        "/api/auth/login",
+        json={"email": "adil@devfleet.local", "password": "Test1234!"},
+    )
+    assert res.status_code == 200
+    token = res.json()["access_token"]
+
+    res = client.get(
+        "/api/projects/p2/bot-history",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert res.status_code == 200, res.text
+    rows = res.json()
+    assert len(rows) == 1
+    assert rows[0]["github_login"] == "adil-mug"
+    assert rows[0]["user_email"] == "adil@devfleet.local"
