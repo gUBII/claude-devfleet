@@ -1474,13 +1474,12 @@ async def run_lane_critique_batch():
 @app.post("/api/lanes")
 async def create_lane_endpoint(body: dict, request: Request):
     """Create a user-defined lane. Built-in lane names are rejected (use PUT
-    to edit those). Admin-only — only operators with the `admin` role can
-    add lanes, since a new lane changes fleet-wide capacity accounting."""
+    to edit those). Any authenticated user can add a lane — consistent with
+    Prompt Studio, which lets non-admins edit lane prompts without a role
+    check. Built-in protection lives at the lanes layer, not here."""
     user = getattr(request.state, "user", None)
     if not user:
         raise HTTPException(401, "Authentication required")
-    if (user.get("role") or "") != "admin":
-        raise HTTPException(403, "Only admins can create lanes")
     from lanes import create_lane, LaneValidationError
     try:
         return await create_lane(
@@ -1497,12 +1496,13 @@ async def create_lane_endpoint(body: dict, request: Request):
 
 @app.delete("/api/lanes/{name}")
 async def delete_lane_endpoint(name: str, request: Request):
-    """Delete a user-created lane. Built-ins are protected at the lanes layer."""
+    """Delete a user-created lane. Built-ins are protected at the lanes
+    layer (delete_lane refuses any name in LANE_DEFAULTS and any row with
+    user_created=0). Auth required, no role check — anyone who can create
+    a lane can also delete the one they created."""
     user = getattr(request.state, "user", None)
     if not user:
         raise HTTPException(401, "Authentication required")
-    if (user.get("role") or "") != "admin":
-        raise HTTPException(403, "Only admins can delete lanes")
     from lanes import delete_lane
     ok, reason = await delete_lane(name)
     if not ok:

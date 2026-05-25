@@ -3,7 +3,6 @@ import {
   getSystemStatus, setGlobalCeiling, listLanes, updateLane,
   createLane, deleteLane,
 } from '../api/client';
-import { useAuth } from '../auth';
 
 const MODELS = [
   'claude-sonnet-4-6',
@@ -13,7 +12,7 @@ const MODELS = [
 
 const LANE_NAME_RE = /^[a-z][a-z0-9_]{1,30}$/;
 
-function LaneEditor({ lane, onSave, onClose, onDeleted, navigate, isAdmin }) {
+function LaneEditor({ lane, onSave, onClose, onDeleted, navigate }) {
   // Capacity / model / enabled only. Prompt authoring lives in Prompt Studio —
   // a single source of truth avoids divergent edits across two surfaces.
   const [form, setForm] = useState({
@@ -25,7 +24,10 @@ function LaneEditor({ lane, onSave, onClose, onDeleted, navigate, isAdmin }) {
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState(null);
 
-  const canDelete = isAdmin && lane.user_created;
+  // Built-ins are protected at the backend (lanes.delete_lane refuses any
+  // name in LANE_DEFAULTS), so we hide the button rather than letting users
+  // click into a guaranteed 409.
+  const canDelete = Boolean(lane.user_created);
 
   const handleSave = async () => {
     setSaving(true);
@@ -309,8 +311,6 @@ function CeilingPicker({ ceiling, onChange }) {
 }
 
 export default function FleetConfig({ navigate }) {
-  const { user } = useAuth();
-  const isAdmin = (user?.role || '') === 'admin';
   const [lanes, setLanes] = useState([]);
   const [ceiling, setCeiling] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -351,16 +351,14 @@ export default function FleetConfig({ navigate }) {
           <h1>Fleet Configuration</h1>
           <p className="subtitle">{lanes.length} lanes · {totalSlots} total slots · click any lane to edit capacity &amp; model (prompt lives in Prompt Studio)</p>
         </div>
-        {isAdmin && (
-          <button
-            className="btn btn-primary"
-            onClick={() => setCreating(true)}
-            title="Create a new lane (admin only)"
-            style={{ whiteSpace: 'nowrap' }}
-          >
-            + New Lane
-          </button>
-        )}
+        <button
+          className="btn btn-primary"
+          onClick={() => setCreating(true)}
+          title="Create a new lane"
+          style={{ whiteSpace: 'nowrap' }}
+        >
+          + New Lane
+        </button>
       </div>
 
       <CeilingPicker ceiling={ceiling} onChange={setCeiling} />
@@ -406,7 +404,6 @@ export default function FleetConfig({ navigate }) {
             setEditing(null);
           }}
           navigate={navigate}
-          isAdmin={isAdmin}
         />
       )}
 
