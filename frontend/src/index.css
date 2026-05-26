@@ -2011,23 +2011,24 @@ body {
 /* New gate card (member-select flow) */
 .auth-gate-card {
   width: 100%;
-  max-width: 480px;
+  max-width: 720px;                     /* widened to fit the ASCII banner */
   background: rgba(17,17,17,0.95);
   border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 20px;
-  padding: 44px 36px 36px;
+  border-radius: 4px;
+  padding: 36px 28px 28px;
   display: flex;
   flex-direction: column;
   align-items: center;
   backdrop-filter: blur(12px);
-  box-shadow: 0 24px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(180,79,247,0.06);
+  box-shadow: 0 24px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(212,160,23,0.08);
 }
+/* Hosts the BrandMark ascii art — let it size itself, just centre + space. */
 .auth-nexis-logo {
-  height: 36px;
-  width: auto;
-  object-fit: contain;
+  width: 100%;
   margin-bottom: 16px;
-  opacity: 0.9;
+  display: flex;
+  justify-content: center;
+  overflow: visible;
 }
 .auth-gate-divider {
   width: 40px;
@@ -3667,3 +3668,117 @@ body {
   white-space: nowrap;
 }
 .ws-meter-count b { color: var(--brand-mark); font-weight: 700; margin-right: 1px; }
+
+/* ═════════════════════════ BRAND MARK ═══════════════════════════════
+   ASCII block-letter banner from start.sh. Same source of truth across
+   CLI welcome banner and Web logo.
+   ════════════════════════════════════════════════════════════════════ */
+
+.brand-mark {
+  font-family: var(--font-mono);
+  color: var(--brand-mark);
+  display: inline-block;
+}
+
+/* Compact wordmark used in the sidebar (sm size) */
+.brand-mark--sm {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+.brand-mark__bar {
+  color: var(--brand-mark);
+  font-size: 14px;
+  letter-spacing: -2px;
+  text-shadow: 0 0 6px rgba(212, 160, 23, 0.45);
+}
+.brand-mark__sep {
+  color: var(--ink-3);
+  font-size: 14px;
+}
+.brand-mark__wordmark {
+  color: var(--ink-0);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+.brand-mark__apos { color: var(--brand-mark); }
+.brand-mark__tm {
+  color: var(--ink-2);
+  font-size: 9px;
+  vertical-align: super;
+  margin-left: 1px;
+}
+
+/* Full ASCII block-letter art (md / lg) */
+.brand-mark--ascii {
+  --brand-intensity: 1;
+  margin: 0;
+  padding: 0;
+  color: color-mix(in oklab, var(--brand-mark) calc(var(--brand-intensity) * 100%), #3a2d10);
+  background: transparent;
+  white-space: pre;
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+  font-weight: 400;
+  text-shadow:
+    0 0 calc(6px * var(--brand-intensity))  rgba(212, 160, 23, calc(0.35 * var(--brand-intensity))),
+    0 0 calc(14px * var(--brand-intensity)) rgba(212, 160, 23, calc(0.15 * var(--brand-intensity)));
+  overflow: visible;
+  letter-spacing: 0;
+  line-height: 1.05;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+  transition: color 220ms ease, text-shadow 220ms ease, opacity 220ms ease;
+}
+
+/* Login page hero — fluid scale to never clip on phone widths */
+.brand-mark--lg {
+  font-size: clamp(5px, 1.05vw + 1px, 11px) !important;
+}
+.brand-mark--md {
+  font-size: clamp(4px, 0.7vw + 1px, 8px) !important;
+}
+
+/* Slow CRT idle hum (always on) */
+@keyframes brand-mark-flicker {
+  0%, 100% { opacity: 1; }
+  47%      { opacity: 1; }
+  48%      { opacity: 0.85; }
+  49%      { opacity: 1; }
+  50%      { opacity: 0.95; }
+  51%      { opacity: 1; }
+}
+.auth-page .brand-mark--ascii {
+  animation: brand-mark-flicker 6s ease-in-out infinite;
+}
+
+/* Armed — email validated, brighter and steadier */
+.brand-mark--ascii.is-armed {
+  text-shadow:
+    0 0 8px  rgba(212, 160, 23, 0.55),
+    0 0 18px rgba(212, 160, 23, 0.28),
+    0 0 38px rgba(212, 160, 23, 0.15);
+}
+
+/* Typing — every keystroke remounts the element (pulseKey) which restarts this
+   one-shot animation, producing a punchy flicker pulse per stroke. Independent
+   of password correctness — pure decoration, leaks nothing. */
+@keyframes brand-mark-strike {
+  0%   { opacity: 0.55; filter: brightness(0.7); }
+  18%  { opacity: 1;    filter: brightness(1.35); }
+  46%  { opacity: 0.82; filter: brightness(0.9); }
+  100% { opacity: 1;    filter: brightness(1); }
+}
+.brand-mark--ascii.is-typing {
+  animation: brand-mark-strike 420ms ease-out;
+}
+
+/* When the brand mark dims below ~40% intensity (gap-in-typing), kill the
+   subtle hum so it looks definitively "switched off". */
+.brand-mark--ascii[style*="--brand-intensity: 0.35"],
+.brand-mark--ascii[style*="--brand-intensity:0.35"] {
+  animation: none;
+  opacity: 0.45;
+}

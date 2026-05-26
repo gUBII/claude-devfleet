@@ -3,78 +3,88 @@ import React from 'react';
 /**
  * BrandMark — the locked DevFleet logo.
  *
- *   ▌▍▎▏ │ FARHAN'S DEVFLEET™
+ * Renders the ASCII block-letter art from start.sh (the terminal banner)
+ * as <pre> text. Same source of truth across CLI + Web.
  *
- * Renders a designed PNG asset generated via Gemini Nano Banana
- * (frontend/public/brand/farhan-devfleet-logo.png). Heights are fixed
- * tiers so the image stays crisp at any zoom; width auto-scales by
- * preserving aspect ratio. The asset already includes the dark
- * charcoal background, so callers don't need to wrap it.
+ *   ███████╗ █████╗ ██████╗ ██╗  ██╗ █████╗ ███╗   ██╗'s
+ *   ██████╗ ███████╗██╗   ██╗███████╗██╗     ███████╗███████╗████████╗
  *
  * Props:
- *   size      — 'sm' | 'md' | 'lg'   (height tier)
- *   wordmark  — false to render the glyph-only crop (sidebar/favicon)
+ *   size      — 'sm' | 'md' | 'lg'
+ *   wordmark  — if false, render the compact wordmark instead of full ASCII
  *   className — optional extra class
  */
-const HEIGHTS = { sm: 28, md: 42, lg: 80 };
 
-export default function BrandMark({ size = 'md', wordmark = true, className = '' }) {
-  const h = HEIGHTS[size] || HEIGHTS.md;
+// FARHAN with a small block-letter ' s tacked to the top-right corner.
+// The full block letters are 6 rows tall; the possessive is a 3-row mini-block
+// aligned to the top of the FARHAN block so it reads as a superscript "'s".
+const FARHAN = [
+  "███████╗ █████╗ ██████╗ ██╗  ██╗ █████╗ ███╗   ██╗ █ ▄▀▀╗",
+  "██╔════╝██╔══██╗██╔══██╗██║  ██║██╔══██╗████╗  ██║   ╚═╗ ",
+  "█████╗  ███████║██████╔╝███████║███████║██╔██╗ ██║   ▀▄╝ ",
+  "██╔══╝  ██╔══██║██╔══██╗██╔══██║██╔══██║██║╚██╗██║       ",
+  "██║     ██║  ██║██║  ██║██║  ██║██║  ██║██║ ╚████║       ",
+  "╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝       ",
+].join('\n');
 
-  // Full lockup vs glyph-only. Both are the same source — we crop via CSS.
-  const srcWebp = '/brand/farhan-devfleet-logo.webp';
-  const srcPng  = '/brand/farhan-devfleet-logo.png';
+const DEVFLEET = [
+  "██████╗ ███████╗██╗   ██╗███████╗██╗     ███████╗███████╗████████╗",
+  "██╔══██╗██╔════╝██║   ██║██╔════╝██║     ██╔════╝██╔════╝╚══██╔══╝",
+  "██║  ██║█████╗  ██║   ██║█████╗  ██║     █████╗  █████╗     ██║   ",
+  "██║  ██║██╔══╝  ╚██╗ ██╔╝██╔══╝  ██║     ██╔══╝  ██╔══╝     ██║   ",
+  "██████╔╝███████╗ ╚████╔╝ ██║     ███████╗███████╗███████╗   ██║   ",
+  "╚═════╝ ╚══════╝  ╚═══╝  ╚═╝     ╚══════╝╚══════╝╚══════╝   ╚═╝   ",
+].join('\n');
 
-  if (wordmark) {
+const FONT_SIZE = {
+  sm: 5,      // sidebar — fits 240px column
+  md: 8,
+  lg: 11,     // login card
+};
+
+/**
+ * State-driven props (all optional, decorative-only — no auth info leaked):
+ *   state     — 'idle' | 'armed' | 'typing' (drives the animation register)
+ *   intensity — 0..1, scales glow + opacity for length-based ramp
+ *   pulseKey  — change this number on every keystroke to trigger a flicker pulse
+ */
+export default function BrandMark({
+  size = 'md',
+  wordmark = false,
+  className = '',
+  state = 'idle',
+  intensity = 1,
+  pulseKey = 0,
+}) {
+  const fs = FONT_SIZE[size] || FONT_SIZE.md;
+  const styleVars = {
+    '--brand-intensity': Math.max(0.35, Math.min(1, intensity)),
+  };
+
+  // For the smallest size, render just a tight compact wordmark rather than
+  // the full block letters — sidebar column is too narrow for the ASCII art.
+  if (size === 'sm') {
     return (
-      <picture className={`brand-mark brand-mark--${size} ${className}`}>
-        <source srcSet={srcWebp} type="image/webp" />
-        <img
-          src={srcPng}
-          alt="Farhan's DevFleet"
-          style={{
-            height: `${h}px`,
-            width: 'auto',
-            display: 'block',
-            maxWidth: '100%',
-            objectFit: 'contain',
-          }}
-          draggable={false}
-        />
-      </picture>
+      <span className={`brand-mark brand-mark--sm ${className}`}>
+        <span className="brand-mark__bar" aria-hidden="true">▌▍▎▏</span>
+        <span className="brand-mark__sep" aria-hidden="true">│</span>
+        <span className="brand-mark__wordmark">
+          FARHAN<span className="brand-mark__apos">'S</span> DEVFLEET<span className="brand-mark__tm">™</span>
+        </span>
+      </span>
     );
   }
 
-  // Glyph-only — crop to the left ~22% of the image where the four bars live.
-  // Done with object-position + a fixed aspect-ratio container.
   return (
-    <span
-      className={`brand-mark brand-mark--${size} brand-mark--glyph ${className}`}
-      style={{
-        display: 'inline-block',
-        height: `${h}px`,
-        width: `${h * 0.95}px`,
-        overflow: 'hidden',
-        flexShrink: 0,
-      }}
+    <pre
+      key={`pulse-${pulseKey}`}
+      className={`brand-mark brand-mark--${size} brand-mark--ascii is-${state} ${className}`}
+      style={{ fontSize: `${fs}px`, lineHeight: 1.05, ...styleVars }}
+      aria-label="Farhan's DevFleet"
     >
-      <picture>
-        <source srcSet={srcWebp} type="image/webp" />
-        <img
-          src={srcPng}
-          alt="Farhan's DevFleet"
-          style={{
-            height: '100%',
-            width: 'auto',
-            display: 'block',
-            objectFit: 'cover',
-            objectPosition: 'left center',
-            transform: 'scale(1.6) translateX(8%)',
-            transformOrigin: 'left center',
-          }}
-          draggable={false}
-        />
-      </picture>
-    </span>
+{FARHAN}
+{'\n'}
+{DEVFLEET}
+    </pre>
   );
 }
