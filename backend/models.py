@@ -358,7 +358,7 @@ class MissionCreate(BaseModel):
     depends_on: List[str] = []               # mission IDs that must complete first
     auto_dispatch: bool = False              # auto-dispatch when dependencies met
     schedule_cron: Optional[str] = None      # cron expression for recurring missions
-    status: Optional[str] = None             # Moofasa drafts pass 'draft' so watcher skips them
+    status: Optional[str] = None             # Watcher picks up status="draft"; "pending" / other values are inert until manually advanced
     skip_quality_gates: bool = False         # skip REV-/TEST- sub-mission spawn step
 
 
