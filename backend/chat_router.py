@@ -4,8 +4,8 @@ Turns a free-form operator message into a routing decision used by the chat
 endpoint to pick a persona executor and apply RBAC.
 
 Routing precedence (highest first):
-  1. Slash prefix in the message: `/haiku`, `/gitsheba` (or legacy `/sonnet`),
-     `/opus` → direct map.
+  1. Slash prefix in the message: `/kiran`, `/gitsheba`, `/arun`, `/probaho`
+     (or legacy `/haiku`, `/opus`, `/sonnet`) → direct map.
   2. Explicit `force_persona` from the API body (ProjectChatRequest).
   3. Legacy `planner_mode=True` → architect.
   4. Keyword heuristic on the message text.
@@ -34,15 +34,22 @@ from models import (
 log = logging.getLogger("devfleet.chat_router")
 
 # Slash prefix must be the FIRST token; otherwise discussing "/gitsheba" in
-# prose wouldn't accidentally route the message. `/sonnet` is retained as a
-# legacy alias — drop it once telemetry shows zero usage.
-_SLASH_RE = re.compile(r"^\s*/(haiku|gitsheba|sonnet|opus)\b", re.IGNORECASE)
+# prose wouldn't accidentally route the message. Legacy `/haiku`, `/opus`, and
+# `/sonnet` are retained as aliases — drop them once telemetry shows zero usage.
+_SLASH_RE = re.compile(
+    r"^\s*/(kiran|arun|probaho|haiku|gitsheba|sonnet|opus)\b", re.IGNORECASE
+)
 
 _SLASH_TO_PERSONA: dict[str, ChatPersona] = {
-    "haiku": "researcher",
+    # Current tier names
+    "kiran": "researcher",
+    "probaho": "git_operator",
+    "arun": "architect",
+    # Legacy aliases
+    "haiku": "researcher",   # legacy — TODO(2026-06-30): remove after telemetry confirms zero usage
     "gitsheba": "git_operator",
     "sonnet": "git_operator",  # legacy alias — TODO(2026-06-30): remove after telemetry confirms zero usage
-    "opus": "architect",
+    "opus": "architect",       # legacy — TODO(2026-06-30): remove after telemetry confirms zero usage
 }
 
 # Two heuristic vocabularies, matched against the lowercased message.
@@ -60,7 +67,7 @@ def strip_slash_prefix(message: str) -> str:
     """Return the message with any leading `/persona` prefix removed.
 
     Used by persona executors so the operator's actual question reaches the
-    SDK without the routing slash. `/sonnet merge PR 42` → `merge PR 42`.
+    SDK without the routing slash. `/kiran list models` → `list models`.
     """
     return _SLASH_RE.sub("", message, count=1).lstrip()
 
