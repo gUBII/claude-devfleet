@@ -333,6 +333,69 @@ def _check_mcp_request(request) -> tuple[bool, str]:
     return True, ""
 
 
+async def _buffer_asgi_body(receive):
+    """Drain the ASGI request body once and return (body_bytes, replay_receive)."""
+    chunks: list[bytes] = []
+    more = True
+    while more:
+        msg = await receive()
+        if msg["type"] != "http.request":
+            # Disconnect or non-body — just stop draining.
+            break
+        chunks.append(msg.get("body", b""))
+        more = msg.get("more_body", False)
+    body = b"".join(chunks)
+
+    delivered = False
+
+    async def replay():
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        # Subsequent calls — block on the original receive (disconnect signals etc.)
+        return await receive()
+
+    return body, replay
+
+
+def _log_mcp_post(session_id: str, body: bytes) -> None:
+    """One-line correlation log for every POST to /mcp.
+
+    Library swallows validation errors with `-32602 / data: ""` (see
+    mcp/shared/session.py). When that happens the only way to root-cause is
+    matching server logs to the failing request — so we always log the
+    JSON-RPC id, method, and a clipped preview here.
+
+    The preview is the first 400 bytes of the JSON body — that includes
+    prompt content, paths, and IDs. Treat /mcp request logs as sensitive
+    alongside everything else the agents see.
+    """
+    if not body:
+        log.info("MCP POST session=%s EMPTY body", session_id)
+        return
+    preview = body[:400].decode("utf-8", errors="replace")
+    method = "?"
+    msg_id = "?"
+    body_len = len(body)
+    try:
+        parsed = json.loads(body)
+        if isinstance(parsed, dict):
+            method = str(parsed.get("method", "?"))
+            msg_id = str(parsed.get("id", "?"))
+            params = parsed.get("params") or {}
+            if isinstance(params, dict):
+                tool = params.get("name")
+                if tool:
+                    method = f"{method}:{tool}"
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    log.info(
+        "MCP POST session=%s id=%s method=%s bytes=%d preview=%s",
+        session_id, msg_id, method, body_len, preview,
+    )
+
+
 class _McpHttpEndpoint:
     """Streamable HTTP MCP endpoint — handles GET, POST, DELETE on /mcp."""
 
@@ -362,7 +425,15 @@ class _McpHttpEndpoint:
         if not session_id:
             session_id = str(_uuid.uuid4())
         transport = await _ensure_http_transport(session_id)
-        await transport.handle_request(scope, receive, send)
+
+        if request.method == "POST":
+            # Buffer body so we can log it for -32602 root-causing without
+            # consuming the stream from the downstream transport.
+            body, replay = await _buffer_asgi_body(receive)
+            _log_mcp_post(session_id, body)
+            await transport.handle_request(scope, replay, send)
+        else:
+            await transport.handle_request(scope, receive, send)
 
 
 _mcp_http_endpoint = _McpHttpEndpoint()
@@ -462,6 +533,58 @@ async def auth_list_users(request: Request):
         return [dict(r) for r in rows]
     finally:
         await conn.close()
+
+
+# ──────────────────────────────────────────────
+# Dev Profiles — public leaderboard
+# ──────────────────────────────────────────────
+
+
+def _derive_avatar_url(noreply_email: str) -> str:
+    """GitHub avatar from the numeric-ID prefix of a noreply email.
+
+    Format: `<id>+<login>@users.noreply.github.com` → `avatars/u/<id>`.
+    Empty / malformed input returns empty string; frontend falls back to
+    an initials placeholder.
+    """
+    if not noreply_email or "+" not in noreply_email:
+        return ""
+    prefix = noreply_email.split("+", 1)[0]
+    if not prefix.isdigit():
+        return ""
+    return f"https://avatars.githubusercontent.com/u/{prefix}"
+
+
+@app.get("/api/dev-profiles")
+async def list_dev_profiles(request: Request):
+    """Public leaderboard of non-admin devs and their dev_metrics.
+
+    Any authenticated user can read this — admins included, but admin rows
+    are NEVER in the response (see dev_metrics.list_public_profiles). The
+    intent is gentle social pressure on dev behaviour; admins opting out
+    is a product constraint, not a privacy one.
+    """
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    import dev_metrics
+    rows = await dev_metrics.list_public_profiles()
+    out = []
+    for r in rows:
+        out.append({
+            "user_id": r["id"],
+            "email": r["email"],
+            "github_login": r["github_login"],
+            "github_name": r["github_name"],
+            "avatar_url": _derive_avatar_url(r["github_noreply_email"]),
+            "likeness_points": r["likeness_points"],
+            "pr_merges_clean": r["pr_merges_clean"],
+            "pr_merges_total": r["pr_merges_total"],
+            "dollars_saved_routing": round(r["dollars_saved_routing"], 2),
+            "current_clean_streak": r["current_clean_streak"],
+            "longest_clean_streak": r["longest_clean_streak"],
+        })
+    return out
 
 
 # ──────────────────────────────────────────────
@@ -2111,7 +2234,7 @@ class PlanRequest(BaseModel):
     project_path: str | None = None  # auto-generate if not provided
 
 @app.post("/api/plan", status_code=201)
-async def api_plan_project(body: PlanRequest):
+async def api_plan_project(body: PlanRequest, request: Request):
     """Take a natural language prompt, plan a project with chained missions."""
     # Auto-generate project path if not provided
     project_path = body.project_path
@@ -2143,6 +2266,20 @@ async def api_plan_project(body: PlanRequest):
             await conn.commit()
         finally:
             await conn.close()
+
+        # Credit the authenticated dev with routing savings (Feature 2 + 1).
+        # No-op for unauth requests (legacy callers), admins, or zero savings.
+        routing = result.get("model_routing")
+        saved = (routing or {}).get("dollars_saved_vs_sonnet", 0) or 0
+        if saved > 0:
+            jwt_user = getattr(request.state, "user", None)
+            user_id = jwt_user.get("sub") if jwt_user else None
+            if user_id:
+                try:
+                    import dev_metrics
+                    await dev_metrics.record_routing_savings(user_id, saved)
+                except Exception:
+                    log.exception("Failed to credit routing savings for %s", user_id)
         return result
     except ValueError as e:
         raise HTTPException(422, str(e))

@@ -78,6 +78,33 @@ function UserLabel({ email, githubLogin, currentEmail }) {
   );
 }
 
+function ModelRouteChips({ routing }) {
+  if (!routing || !routing.enabled || !routing.phases?.length) return null;
+  const saved = routing.dollars_saved_vs_sonnet || 0;
+  return (
+    <div className="moofasa-draft" style={{ marginTop: 8 }}>
+      <div className="moofasa-draft__label">Model routing</div>
+      <div className="model-route-chips">
+        {routing.phases.map((p, i) => (
+          <span
+            key={p.mission_id || i}
+            className="model-route-chip"
+            data-tier={p.tier}
+            title={p.reason || ''}
+          >
+            Phase {i + 1}: {p.tier}
+          </span>
+        ))}
+      </div>
+      {saved > 0 && (
+        <div className="model-route-savings">
+          Saved Farhan ${saved.toFixed(2)} on this run.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MessageContent({ msg, projectId, onCreateMission, onOpenSession, currentEmail }) {
   const content = msg.content || '';
   const draft = parseMissionBlock(content);
@@ -128,6 +155,7 @@ function MessageContent({ msg, projectId, onCreateMission, onOpenSession, curren
       {msg.is_plan && msg.id && (
         <PlanActions projectId={projectId} planId={msg.id} planTitle={msg.plan_title} />
       )}
+      {msg.model_routing && <ModelRouteChips routing={msg.model_routing} />}
     </>
   );
 }

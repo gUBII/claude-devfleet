@@ -29,6 +29,14 @@ log = logging.getLogger("devfleet.mcp-external")
 server = Server("devfleet")
 
 
+# Clients MUST send a fresh JSON-RPC `id` per request within a session.
+# Concurrent requests with the same id (e.g. a polling loop hardcoded to id=42
+# plus an interactive call) collide and the underlying MCP library responds
+# with the opaque `{"code": -32602, "message": "Invalid request parameters",
+# "data": ""}` — see #4 in the DX feedback triage. Use a UUID, monotonic
+# counter, or `random.randint(1, 1_000_000)`.
+
+
 # ── Helper: resolve projects dir ──
 
 def _projects_base() -> str:
@@ -64,6 +72,13 @@ TOOLS = [
                     "type": "string",
                     "description": "Optional filesystem path for the project. Auto-generated if not provided."
                 },
+                "created_by_email": {
+                    "type": "string",
+                    "description": (
+                        "Your DevFleet account email (e.g. hasan@devfleet.local). "
+                        "Agents will commit under your git identity and use your saved GitHub PAT."
+                    ),
+                },
             },
             "required": ["prompt"],
         },
@@ -85,7 +100,9 @@ TOOLS = [
         name="create_mission",
         description=(
             "Create a mission (task) in an existing project. "
-            "Supports dependencies, auto-dispatch, and priority."
+            "Supports dependencies, auto-dispatch, priority, and lane routing. "
+            "Use `lane` to target a specialist (reviewer, security, e2e, etc.) — "
+            "without it the mission lands on the default coder lane regardless of intent."
         ),
         inputSchema={
             "type": "object",
@@ -102,6 +119,41 @@ TOOLS = [
                 "auto_dispatch": {"type": "boolean", "description": "Auto-dispatch when dependencies complete"},
                 "priority": {"type": "integer", "description": "Priority (0=normal, 1=high, 2=critical)"},
                 "model": {"type": "string", "description": "Model to use (default: claude-sonnet-4-6)"},
+                "mission_type": {
+                    "type": "string",
+                    "enum": [
+                        "implement", "fix", "full", "review", "security", "test",
+                        "e2e", "qa", "dynamic_test", "explore", "planner",
+                        "orchestrator", "research",
+                    ],
+                    "description": (
+                        "Mission intent. Determines tool preset AND default lane "
+                        "(implement→coder, review→reviewer, security→security, test→tester, "
+                        "e2e→e2e, qa→qa, research→researcher, explore→explorer, planner→orchestrator). "
+                        "Override the lane mapping with the `lane` field."
+                    ),
+                },
+                "lane": {
+                    "type": "string",
+                    "enum": [
+                        "coder", "reviewer", "tester", "e2e", "security", "qa",
+                        "dynamic_tester", "researcher", "explorer", "orchestrator",
+                    ],
+                    "description": (
+                        "Scheduling lane override. Each lane has its own concurrency cap, model, "
+                        "and tool preset. If omitted, derived from mission_type. Use get_dashboard "
+                        "to inspect lane capacity before dispatching to a full one."
+                    ),
+                },
+                "created_by_email": {
+                    "type": "string",
+                    "description": (
+                        "Your DevFleet account email (e.g. hasan@devfleet.local). "
+                        "Required for the agent to commit under your git identity and "
+                        "use your saved GitHub PAT. Without this the agent uses the "
+                        "machine-level git config."
+                    ),
+                },
             },
             "required": ["project_id", "title", "prompt"],
         },
@@ -182,10 +234,55 @@ TOOLS = [
         },
     ),
     types.Tool(
+        name="update_mission",
+        description=(
+            "Update fields on a mission that hasn't started yet. "
+            "Use for fixing typos, changing prompts, re-targeting depends_on, or flipping "
+            "auto_dispatch before the watcher picks it up. Refuses to edit running missions."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "mission_id": {"type": "string", "description": "Mission ID to update"},
+                "title": {"type": "string"},
+                "prompt": {"type": "string", "description": "Replaces detailed_prompt"},
+                "acceptance_criteria": {"type": "string"},
+                "depends_on": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Replaces the dependency list entirely",
+                },
+                "auto_dispatch": {"type": "boolean"},
+                "priority": {"type": "integer"},
+                "model": {"type": "string"},
+                "mission_type": {"type": "string"},
+                "lane": {"type": "string"},
+            },
+            "required": ["mission_id"],
+        },
+    ),
+    types.Tool(
+        name="delete_mission",
+        description=(
+            "Delete a draft/pending mission. Refuses to delete running missions "
+            "(cancel them first). Also refuses if other missions depend on it."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "mission_id": {"type": "string", "description": "Mission ID to delete"},
+            },
+            "required": ["mission_id"],
+        },
+    ),
+    types.Tool(
         name="wait_for_mission",
         description=(
             "Wait for a mission to complete and return its final status and report. "
-            "Polls every 5 seconds. Use after dispatch_mission to block until done."
+            "Polls every 5 seconds. Use after dispatch_mission to block until done. "
+            "Caller note: if you have other concurrent calls in the same MCP session "
+            "(monitor, status checks), give every request a unique JSON-RPC `id` "
+            "(UUID or random int). Duplicate ids cause an opaque -32602."
         ),
         inputSchema={
             "type": "object",
@@ -255,6 +352,10 @@ async def _handle_tool(name: str, args: dict) -> dict:
             return await _list_missions(args, conn)
         elif name == "cancel_mission":
             return await _cancel_mission(args, conn)
+        elif name == "update_mission":
+            return await _update_mission(args, conn)
+        elif name == "delete_mission":
+            return await _delete_mission(args, conn)
         elif name == "wait_for_mission":
             return await _wait_for_mission(args)
         elif name == "get_dashboard":
@@ -276,7 +377,8 @@ async def _plan_project(args: dict, conn) -> dict:
         slug = _slugify(prompt)
         project_path = os.path.join(_projects_base(), slug)
 
-    result = await plan_project(prompt, project_path)
+    created_by_email = (args.get("created_by_email") or "").strip() or None
+    result = await plan_project(prompt, project_path, created_by_email=created_by_email)
     return {
         "project_id": result["project"]["id"],
         "project_name": result["project"]["name"],
@@ -330,11 +432,22 @@ async def _create_mission(args: dict, conn) -> dict:
     depends_on = json.dumps(args.get("depends_on", []))
     auto_dispatch = 1 if args.get("auto_dispatch", False) else 0
 
+    created_by_email = (args.get("created_by_email") or "").strip()
+
+    # mission_type defaults to 'implement'; lane derives from it unless explicitly set.
+    # Keep this mapping in sync with MISSION_TYPE_TO_LANE in models.py.
+    mission_type = (args.get("mission_type") or "implement").strip()
+    lane = (args.get("lane") or "").strip()
+    if not lane:
+        from models import MISSION_TYPE_TO_LANE
+        lane = MISSION_TYPE_TO_LANE.get(mission_type, "coder")
+
     await conn.execute(
         """INSERT INTO missions
            (id, project_id, title, detailed_prompt, acceptance_criteria,
-            depends_on, auto_dispatch, priority, model, mission_number)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            depends_on, auto_dispatch, priority, model, mission_number,
+            created_by_email, mission_type, lane)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             mid,
             args["project_id"],
@@ -346,6 +459,9 @@ async def _create_mission(args: dict, conn) -> dict:
             args.get("priority", 0),
             args.get("model", "claude-sonnet-4-6"),
             next_num,
+            created_by_email or None,
+            mission_type,
+            lane,
         ),
     )
     await conn.commit()
@@ -355,6 +471,8 @@ async def _create_mission(args: dict, conn) -> dict:
         "mission_number": next_num,
         "title": args["title"],
         "project_id": args["project_id"],
+        "mission_type": mission_type,
+        "lane": lane,
         "auto_dispatch": bool(auto_dispatch),
         "depends_on": args.get("depends_on", []),
     }
@@ -487,27 +605,87 @@ async def _get_mission_status(args: dict, conn) -> dict:
 
 
 async def _get_report(args: dict, conn) -> dict:
+    """Return a structured report or a precise state explaining why one isn't available.
+
+    A 'no report' result has four real causes — collapsing them all to a single
+    generic 404 made root-causing painful. Distinguish them so callers know
+    whether to wait, re-dispatch, or accept the agent never submitted one.
+    """
     mid = args["mission_id"]
+
+    cur = await conn.execute(
+        "SELECT id, status FROM missions WHERE id = ?",
+        (mid,),
+    )
+    mission = await cur.fetchone()
+    if not mission:
+        return {"error": f"Mission {mid} not found", "state": "not_found"}
+    mission = dict(mission)
 
     cur = await conn.execute(
         "SELECT * FROM reports WHERE mission_id = ? ORDER BY created_at DESC LIMIT 1",
         (mid,),
     )
     report = await cur.fetchone()
-    if not report:
-        return {"error": f"No report found for mission {mid}", "hint": "The mission may not have completed yet."}
+    if report:
+        report = dict(report)
+        return {
+            "mission_id": mid,
+            "state": "found",
+            "mission_status": mission["status"],
+            "files_changed": report["files_changed"],
+            "what_done": report["what_done"],
+            "what_open": report["what_open"],
+            "what_tested": report["what_tested"],
+            "what_untested": report["what_untested"],
+            "next_steps": report["next_steps"],
+            "errors_encountered": report["errors_encountered"],
+            "created_at": report["created_at"],
+        }
 
-    report = dict(report)
+    # No report yet — classify why.
+    cur = await conn.execute(
+        "SELECT id, status, started_at, ended_at FROM agent_sessions "
+        "WHERE mission_id = ? ORDER BY started_at DESC LIMIT 1",
+        (mid,),
+    )
+    session = await cur.fetchone()
+
+    if mission["status"] in ("draft", "pending"):
+        return {
+            "mission_id": mid,
+            "state": "pending",
+            "mission_status": mission["status"],
+            "hint": "Mission has not been dispatched. Use dispatch_mission, or set auto_dispatch + satisfy depends_on.",
+        }
+    if mission["status"] == "running":
+        return {
+            "mission_id": mid,
+            "state": "running",
+            "mission_status": "running",
+            "session_id": dict(session)["id"] if session else None,
+            "hint": "Agent is still working. Reports are written when the agent calls submit_report at the end of its run.",
+        }
+    if mission["status"] in ("completed", "failed") and session:
+        sess = dict(session)
+        return {
+            "mission_id": mid,
+            "state": "no_report_submitted",
+            "mission_status": mission["status"],
+            "session_id": sess["id"],
+            "session_status": sess["status"],
+            "session_ended_at": sess["ended_at"],
+            "hint": (
+                "Agent finished without calling submit_report. The commits may have "
+                "landed via auto-merge but no structured report was produced. "
+                "Inspect the worktree branch or session output_log via REST."
+            ),
+        }
     return {
         "mission_id": mid,
-        "files_changed": report["files_changed"],
-        "what_done": report["what_done"],
-        "what_open": report["what_open"],
-        "what_tested": report["what_tested"],
-        "what_untested": report["what_untested"],
-        "next_steps": report["next_steps"],
-        "errors_encountered": report["errors_encountered"],
-        "created_at": report["created_at"],
+        "state": "unknown",
+        "mission_status": mission["status"],
+        "hint": "No session and no report — mission may have been created but never dispatched.",
     }
 
 
@@ -579,6 +757,96 @@ async def _cancel_mission(args: dict, conn) -> dict:
     await conn.commit()
 
     return {"mission_id": mid, "session_id": sid, "status": "cancelled"}
+
+
+async def _update_mission(args: dict, conn) -> dict:
+    mid = args["mission_id"]
+
+    cur = await conn.execute("SELECT status FROM missions WHERE id = ?", (mid,))
+    row = await cur.fetchone()
+    if not row:
+        return {"error": f"Mission {mid} not found"}
+    if row["status"] == "running":
+        return {"error": "Mission is running — cancel it first before editing"}
+
+    # Map external field name (prompt) → DB column (detailed_prompt).
+    field_map = {
+        "title": "title",
+        "prompt": "detailed_prompt",
+        "acceptance_criteria": "acceptance_criteria",
+        "priority": "priority",
+        "model": "model",
+        "mission_type": "mission_type",
+        "lane": "lane",
+    }
+    sets: list[str] = []
+    params: list = []
+    updated: dict = {}
+    for ext_name, col in field_map.items():
+        if ext_name in args and args[ext_name] is not None:
+            sets.append(f"{col} = ?")
+            params.append(args[ext_name])
+            updated[ext_name] = args[ext_name]
+
+    if "depends_on" in args and args["depends_on"] is not None:
+        sets.append("depends_on = ?")
+        params.append(json.dumps(args["depends_on"]))
+        updated["depends_on"] = args["depends_on"]
+
+    if "auto_dispatch" in args and args["auto_dispatch"] is not None:
+        sets.append("auto_dispatch = ?")
+        params.append(1 if args["auto_dispatch"] else 0)
+        updated["auto_dispatch"] = bool(args["auto_dispatch"])
+
+    if not sets:
+        return {"error": "No fields to update"}
+
+    from datetime import datetime, timezone
+    sets.append("updated_at = ?")
+    params.append(datetime.now(timezone.utc).isoformat())
+    params.append(mid)
+
+    await conn.execute(
+        f"UPDATE missions SET {', '.join(sets)} WHERE id = ?",
+        params,
+    )
+    await conn.commit()
+
+    return {"id": mid, "updated": updated}
+
+
+async def _delete_mission(args: dict, conn) -> dict:
+    mid = args["mission_id"]
+
+    cur = await conn.execute("SELECT status FROM missions WHERE id = ?", (mid,))
+    row = await cur.fetchone()
+    if not row:
+        return {"error": f"Mission {mid} not found"}
+    if row["status"] == "running":
+        return {"error": "Mission is running — cancel it first before deleting"}
+
+    # Block delete when other missions list this one in depends_on. SQLite's
+    # json_each lets us filter without loading every row into Python.
+    cur = await conn.execute(
+        "SELECT m.id, m.title FROM missions m, json_each(m.depends_on) j "
+        "WHERE j.value = ?",
+        (mid,),
+    )
+    blockers = [dict(r) for r in await cur.fetchall()]
+    if blockers:
+        return {
+            "error": f"Cannot delete — {len(blockers)} mission(s) depend on this one",
+            "blocked_by": blockers,
+            "hint": "Update those missions to drop this dependency first.",
+        }
+
+    # Cascade to reports + agent_sessions so we don't leak orphans.
+    await conn.execute("DELETE FROM reports WHERE mission_id = ?", (mid,))
+    await conn.execute("DELETE FROM agent_sessions WHERE mission_id = ?", (mid,))
+    await conn.execute("DELETE FROM missions WHERE id = ?", (mid,))
+    await conn.commit()
+
+    return {"id": mid, "deleted": True}
 
 
 async def _wait_for_mission(args: dict) -> dict:

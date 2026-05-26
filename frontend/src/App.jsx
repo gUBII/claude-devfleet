@@ -12,6 +12,7 @@ import ProjectDetail from './pages/ProjectDetail';
 import Integrations from './pages/Integrations';
 import FleetConfig from './pages/FleetConfig';
 import PromptStudio from './pages/PromptStudio';
+import DevProfiles from './pages/DevProfiles';
 import { AuthProvider, useAuth } from './auth';
 import Login from './pages/Login';
 import Register from './pages/Register';
@@ -75,6 +76,8 @@ function AppInner() {
         return <FleetConfig navigate={navigate} />;
       case 'prompt-studio':
         return <PromptStudio navigate={navigate} />;
+      case 'dev-profiles':
+        return <DevProfiles navigate={navigate} />;
       case 'splash':
         return <Splash navigate={navigate} />;
       case 'login':

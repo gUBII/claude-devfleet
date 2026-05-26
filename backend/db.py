@@ -222,6 +222,17 @@ CREATE TABLE IF NOT EXISTS project_bot_history (
 
 CREATE INDEX IF NOT EXISTS idx_bot_history_project
     ON project_bot_history(project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS dev_metrics (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    likeness_points INTEGER DEFAULT 0,
+    pr_merges_clean INTEGER DEFAULT 0,
+    pr_merges_total INTEGER DEFAULT 0,
+    dollars_saved_routing REAL DEFAULT 0,
+    current_clean_streak INTEGER DEFAULT 0,
+    longest_clean_streak INTEGER DEFAULT 0,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 
@@ -332,6 +343,19 @@ async def init_db():
             # lanes from LANE_DEFAULTS stay user_created=0 so the disable-on-
             # startup guard never touches them; user lanes survive restarts.
             "ALTER TABLE lanes ADD COLUMN user_created INTEGER DEFAULT 0",
+            # v15: dev_metrics — Likeness points + behaviour tracking.
+            # Populated lazily on first increment; admin users get no row
+            # (excluded by helpers in dev_metrics.py). Reads by DevProfiles
+            # dashboard.
+            "CREATE TABLE IF NOT EXISTS dev_metrics ("
+            "user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, "
+            "likeness_points INTEGER DEFAULT 0, "
+            "pr_merges_clean INTEGER DEFAULT 0, "
+            "pr_merges_total INTEGER DEFAULT 0, "
+            "dollars_saved_routing REAL DEFAULT 0, "
+            "current_clean_streak INTEGER DEFAULT 0, "
+            "longest_clean_streak INTEGER DEFAULT 0, "
+            "updated_at TEXT DEFAULT (datetime('now')))",
         ]
         for migration in migrations:
             try:
