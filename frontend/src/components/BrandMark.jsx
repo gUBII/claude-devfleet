@@ -57,9 +57,21 @@ export default function BrandMark({
   pulseKey = 0,
 }) {
   const fs = FONT_SIZE[size] || FONT_SIZE.md;
+  const ref = React.useRef(null);
   const styleVars = {
     '--brand-intensity': Math.max(0.35, Math.min(1, intensity)),
   };
+
+  // Restart the strike animation on every keystroke by toggling the class and
+  // forcing a reflow. No remount — the CRT hum keeps running underneath, so
+  // the brand mark never "freezes" between strokes.
+  React.useEffect(() => {
+    const el = ref.current;
+    if (!el || pulseKey === 0) return;
+    el.classList.remove('is-pulse');
+    void el.offsetWidth;          // force reflow so the animation restarts
+    el.classList.add('is-pulse');
+  }, [pulseKey]);
 
   // For the smallest size, render just a tight compact wordmark rather than
   // the full block letters — sidebar column is too narrow for the ASCII art.
@@ -77,7 +89,7 @@ export default function BrandMark({
 
   return (
     <pre
-      key={`pulse-${pulseKey}`}
+      ref={ref}
       className={`brand-mark brand-mark--${size} brand-mark--ascii is-${state} ${className}`}
       style={{ fontSize: `${fs}px`, lineHeight: 1.05, ...styleVars }}
       aria-label="Farhan's DevFleet"
