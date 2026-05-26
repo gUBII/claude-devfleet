@@ -4,8 +4,8 @@ Turns a free-form operator message into a routing decision used by the chat
 endpoint to pick a persona executor and apply RBAC.
 
 Routing precedence (highest first):
-  1. Slash prefix in the message: `/kiran`, `/gitsheba`, `/arun`, `/probaho`
-     (or legacy `/haiku`, `/opus`, `/sonnet`) → direct map.
+  1. Slash prefix in the message: `/kiran`, `/probaho`, `/arun`
+     (or legacy `/gitsheba`, `/haiku`, `/opus`, `/sonnet`) → direct map.
   2. Explicit `force_persona` from the API body (ProjectChatRequest).
   3. Legacy `planner_mode=True` → architect.
   4. Keyword heuristic on the message text.
@@ -46,10 +46,10 @@ _SLASH_TO_PERSONA: dict[str, ChatPersona] = {
     "probaho": "git_operator",
     "arun": "architect",
     # Legacy aliases
-    "haiku": "researcher",   # legacy — TODO(2026-06-30): remove after telemetry confirms zero usage
-    "gitsheba": "git_operator",
-    "sonnet": "git_operator",  # legacy alias — TODO(2026-06-30): remove after telemetry confirms zero usage
-    "opus": "architect",       # legacy — TODO(2026-06-30): remove after telemetry confirms zero usage
+    "haiku": "researcher",      # legacy — TODO(2026-06-30): remove after telemetry confirms zero usage
+    "gitsheba": "git_operator", # legacy — TODO(2026-06-30): remove after telemetry confirms zero usage
+    "sonnet": "git_operator",   # legacy alias — TODO(2026-06-30): remove after telemetry confirms zero usage
+    "opus": "architect",        # legacy — TODO(2026-06-30): remove after telemetry confirms zero usage
 }
 
 # Two heuristic vocabularies, matched against the lowercased message.

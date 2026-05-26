@@ -162,7 +162,7 @@ function MessageContent({ msg, projectId, onCreateMission, onOpenSession, curren
 
 const SLASH_COMMANDS = [
   { cmd: '/kiran', label: '/kiran', desc: 'Researcher — read-only Q&A' },
-  { cmd: '/gitsheba', label: '/gitsheba', desc: 'Git operator — commits, PRs, merges' },
+  { cmd: '/probaho', label: '/probaho', desc: 'Git operator — commits, PRs, merges' },
   { cmd: '/arun', label: '/arun', desc: 'Architect — plans and quick patches' },
 ];
 
@@ -488,7 +488,7 @@ export default function ProjectBot({ projectId, projectName, onClose, navigate }
               title="Prefix your message with a slash to pick a persona"
               style={{ opacity: 0.6 }}
             >
-              /kiran · /gitsheba · /arun
+              /kiran · /probaho · /arun
             </span>
           )}
         </div>
