@@ -100,6 +100,7 @@ TOOLS = [
                     "description": "List of mission IDs this depends on"
                 },
                 "auto_dispatch": {"type": "boolean", "description": "Auto-dispatch when dependencies complete"},
+                "skip_quality_gates": {"type": "boolean", "description": "Skip spawning REV-/TEST- quality-gate sub-missions and go directly to submit_report"},
                 "priority": {"type": "integer", "description": "Priority (0=normal, 1=high, 2=critical)"},
                 "model": {"type": "string", "description": "Model to use (default: claude-sonnet-4-6)"},
             },
@@ -329,12 +330,13 @@ async def _create_mission(args: dict, conn) -> dict:
 
     depends_on = json.dumps(args.get("depends_on", []))
     auto_dispatch = 1 if args.get("auto_dispatch", False) else 0
+    skip_quality_gates = 1 if args.get("skip_quality_gates", False) else 0
 
     await conn.execute(
         """INSERT INTO missions
            (id, project_id, title, detailed_prompt, acceptance_criteria,
-            depends_on, auto_dispatch, priority, model, mission_number)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            depends_on, auto_dispatch, priority, model, mission_number, skip_quality_gates)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             mid,
             args["project_id"],
@@ -346,6 +348,7 @@ async def _create_mission(args: dict, conn) -> dict:
             args.get("priority", 0),
             args.get("model", "claude-sonnet-4-6"),
             next_num,
+            skip_quality_gates,
         ),
     )
     await conn.commit()

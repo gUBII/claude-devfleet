@@ -320,6 +320,10 @@ async def init_db():
             "granted_by TEXT, "
             "granted_at TEXT DEFAULT (datetime('now')), "
             "PRIMARY KEY (user_id, permission))",
+            # v16: skip_quality_gates opt-out flag — lets operators mark a mission
+            # so the coder lane skips the REV-/TEST- sub-mission spawn step
+            # and proceeds directly to submit_report.
+            "ALTER TABLE missions ADD COLUMN skip_quality_gates INTEGER DEFAULT 0",
         ]
         for migration in migrations:
             try:

@@ -154,6 +154,8 @@ LANE_DEFAULTS: dict[str, dict] = {
             "Body must describe what changed — function names, endpoints, behaviour. No vague messages.\n"
             "ZERO attribution trailers — no Co-Authored-By, no Claude, no AI tool mentions. Ever.\n\n"
             "QUALITY GATE — MANDATORY AFTER EVERY IMPLEMENTATION:\n"
+            "If `skip_quality_gates` is true on your mission (read it via `mcp__devfleet-context__get_mission_context`), "
+            "SKIP the create_sub_mission spawn step entirely and proceed directly to submit_report.\n"
             "When your implementation is committed and ready, call `mcp__devfleet-tools__create_sub_mission` "
             "to spawn quality-gate sub-missions. Do this BEFORE calling submit_report.\n"
             "Rules:\n"
@@ -357,6 +359,7 @@ class MissionCreate(BaseModel):
     auto_dispatch: bool = False              # auto-dispatch when dependencies met
     schedule_cron: Optional[str] = None      # cron expression for recurring missions
     status: Optional[str] = None             # Moofasa drafts pass 'draft' so watcher skips them
+    skip_quality_gates: bool = False         # skip REV-/TEST- sub-mission spawn step
 
 
 class MissionUpdate(BaseModel):
@@ -377,6 +380,7 @@ class MissionUpdate(BaseModel):
     auto_dispatch: Optional[bool] = None
     schedule_cron: Optional[str] = None
     schedule_enabled: Optional[bool] = None
+    skip_quality_gates: Optional[bool] = None  # toggle quality-gate skip
 
 
 # ── Lane Configuration ──
