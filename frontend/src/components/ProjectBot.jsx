@@ -13,9 +13,9 @@ function parseMissionBlock(content) {
 }
 
 const PERSONA_META = {
-  researcher: { label: 'Researcher', model: 'Haiku', color: '#5bb8a6' },
-  git_operator: { label: 'Git Operator', model: 'Sonnet', color: '#d49a3a' },
-  architect: { label: 'Architect', model: 'Opus', color: '#7a6cd0' },
+  researcher: { label: 'Researcher', model: 'Kiran', color: '#5bb8a6' },
+  git_operator: { label: 'Git Operator', model: 'Probaho', color: '#d49a3a' },
+  architect: { label: 'Architect', model: 'Arun', color: '#7a6cd0' },
 };
 
 function PersonaBadge({ persona }) {
@@ -161,9 +161,9 @@ function MessageContent({ msg, projectId, onCreateMission, onOpenSession, curren
 }
 
 const SLASH_COMMANDS = [
-  { cmd: '/haiku', label: '/haiku', desc: 'Researcher — read-only Q&A' },
+  { cmd: '/kiran', label: '/kiran', desc: 'Researcher — read-only Q&A' },
   { cmd: '/gitsheba', label: '/gitsheba', desc: 'Git operator — commits, PRs, merges' },
-  { cmd: '/opus', label: '/opus', desc: 'Architect — plans and quick patches' },
+  { cmd: '/arun', label: '/arun', desc: 'Architect — plans and quick patches' },
 ];
 
 function SlashMenu({ filter, selectedIdx, onPick, onHoverIdx }) {
@@ -312,7 +312,7 @@ export default function ProjectBot({ projectId, projectName, onClose, navigate }
     const text = input.trim();
     if (!text || streaming) return;
     if (plannerMode && !window.confirm(
-      'Planner mode uses Opus and may take 30+ seconds. Continue?'
+      'Planner mode uses Arun and may take 30+ seconds. Continue?'
     )) {
       return;
     }
@@ -468,7 +468,7 @@ export default function ProjectBot({ projectId, projectName, onClose, navigate }
         <div className="moofasa-toggler">
           <label
             className="planner-switch"
-            title="Use Opus to produce a full multi-phase markdown plan (~30s, higher cost)"
+            title="Use Arun to produce a full multi-phase markdown plan (~30s, higher cost)"
           >
             <input
               type="checkbox"
@@ -480,7 +480,7 @@ export default function ProjectBot({ projectId, projectName, onClose, navigate }
             <span>Planner mode</span>
           </label>
           {plannerMode && (
-            <span className="moofasa-toggler__cost">Opus · slower · costlier</span>
+            <span className="moofasa-toggler__cost">Arun · slower · costlier</span>
           )}
           {!plannerMode && (
             <span
@@ -488,7 +488,7 @@ export default function ProjectBot({ projectId, projectName, onClose, navigate }
               title="Prefix your message with a slash to pick a persona"
               style={{ opacity: 0.6 }}
             >
-              /haiku · /gitsheba · /opus
+              /kiran · /gitsheba · /arun
             </span>
           )}
         </div>
