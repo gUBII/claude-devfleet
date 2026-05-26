@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { listMissions, listProjects, createMission, reconcileMission } from '../api/client';
 import MissionCard from '../components/MissionCard';
+import { Switch, Segment } from '../components/hw';
 
 const TABS = ['all', 'draft', 'queued', 'running', 'completed', 'failed', 'interrupted'];
 
@@ -213,25 +214,36 @@ export default function MissionBoard({ navigate }) {
                 <label className="form-label">Acceptance Criteria (optional)</label>
                 <textarea className="form-textarea" value={form.acceptance_criteria} onChange={e => setForm({ ...form, acceptance_criteria: e.target.value })} placeholder="- Tests pass\n- No lint errors" rows={3} />
               </div>
-              <div className="flex gap-16">
-                <div className="form-group" style={{ flex: 1 }}>
-                  <label className="form-label">Model</label>
-                  <select className="form-select" value={form.model} onChange={e => setForm({ ...form, model: e.target.value })}>
-                    <option value="claude-opus-4-7">Arun  (deep · ~$5–15/mission)</option>
-                    <option value="claude-sonnet-4-6">Probaho  (fast · ~$1–5/mission)</option>
-                    <option value="claude-haiku-4-5-20251001">Kiran  (lightweight · ~$0.10–1/mission)</option>
-                  </select>
+              <div className="flex gap-16" style={{ flexDirection: 'column' }}>
+                <div className="form-group">
+                  <label className="form-label">Model Tier</label>
+                  <Segment
+                    value={form.model}
+                    onChange={(v) => setForm({ ...form, model: v })}
+                    ariaLabel="Model tier"
+                    options={[
+                      { value: 'claude-opus-4-7',           label: 'Arun · deep' },
+                      { value: 'claude-sonnet-4-6',         label: 'Probaho · fast' },
+                      { value: 'claude-haiku-4-5-20251001', label: 'Kiran · lite' },
+                    ]}
+                  />
                 </div>
-                <div className="form-group" style={{ flex: 1 }}>
-                  <label className="form-label">Type</label>
-                  <select className="form-select" value={form.mission_type} onChange={e => setForm({ ...form, mission_type: e.target.value })}>
-                    <option value="full">Full Access</option>
-                    <option value="implement">Implement</option>
-                    <option value="review">Review</option>
-                    <option value="test">Test</option>
-                    <option value="explore">Explore</option>
-                    <option value="fix">Fix</option>
-                  </select>
+                <div className="form-group">
+                  <label className="form-label">Mission Type</label>
+                  <Segment
+                    value={form.mission_type}
+                    onChange={(v) => setForm({ ...form, mission_type: v })}
+                    ariaLabel="Mission type"
+                    size="sm"
+                    options={[
+                      { value: 'full',      label: 'Full' },
+                      { value: 'implement', label: 'Implement' },
+                      { value: 'review',    label: 'Review' },
+                      { value: 'test',      label: 'Test' },
+                      { value: 'explore',   label: 'Explore' },
+                      { value: 'fix',       label: 'Fix' },
+                    ]}
+                  />
                 </div>
               </div>
               <div className="flex gap-16">
@@ -260,22 +272,12 @@ export default function MissionBoard({ navigate }) {
                     <div style={{ fontSize: 13, fontWeight: 600 }}>Auto-Dispatch</div>
                     <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Automatically dispatch when dependencies are met</div>
                   </div>
-                  <label style={{ position: 'relative', width: 44, height: 24, cursor: 'pointer' }}>
-                    <input type="checkbox" checked={form.auto_dispatch} onChange={e => setForm({ ...form, auto_dispatch: e.target.checked })}
-                      style={{ position: 'absolute', opacity: 0, width: 0, height: 0 }} />
-                    <span style={{
-                      position: 'absolute', inset: 0, borderRadius: 12,
-                      background: form.auto_dispatch ? 'var(--success)' : 'var(--bg-input)',
-                      border: '1px solid ' + (form.auto_dispatch ? 'var(--success)' : 'var(--border)'),
-                      transition: 'all 0.2s',
-                    }}>
-                      <span style={{
-                        position: 'absolute', top: 2, left: form.auto_dispatch ? 22 : 2,
-                        width: 18, height: 18, borderRadius: '50%', background: 'white',
-                        transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
-                      }} />
-                    </span>
-                  </label>
+                  <Switch
+                    checked={form.auto_dispatch}
+                    onChange={(v) => setForm({ ...form, auto_dispatch: v })}
+                    tone="g"
+                    ariaLabel="Auto-dispatch"
+                  />
                 </div>
 
                 {/* Schedule */}
