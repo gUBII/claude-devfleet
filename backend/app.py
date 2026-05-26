@@ -1271,39 +1271,41 @@ async def list_missions(
 ):
     conn = await db.get_db()
     try:
-        query = """SELECT m.*, p.name AS project_name
-                   FROM missions m
-                   JOIN projects p ON p.id = m.project_id
-                   WHERE 1=1"""
-        params = []
+        base = """FROM missions m
+                  JOIN projects p ON p.id = m.project_id
+                  WHERE 1=1"""
+        params: list = []
         # Hide synthetic chat-turn missions by default — they belong to the
         # chat surface, not the operator mission board. Opt back in with
         # `?include_chat_turns=true` (used by audit/debugging tooling).
         if not include_chat_turns:
-            query += " AND COALESCE(m.is_chat_turn, 0) = 0"
+            base += " AND COALESCE(m.is_chat_turn, 0) = 0"
         if project_id:
-            query += " AND m.project_id=?"
+            base += " AND m.project_id=?"
             params.append(project_id)
         if status:
-            query += " AND m.status=?"
+            base += " AND m.status=?"
             params.append(status)
         if parent_mission_id:
-            query += " AND m.parent_mission_id=?"
+            base += " AND m.parent_mission_id=?"
             params.append(parent_mission_id)
-        query += " ORDER BY m.priority DESC, m.created_at DESC"
-        rows = await conn.execute_fetchall(query, params)
-        # Tag filter is applied in Python because tags are stored as JSON text;
-        # LIMIT/OFFSET therefore slice the filtered list rather than the raw SQL result.
-        results = []
-        for r in rows:
-            d = dict(r)
-            if tag:
-                tags = json.loads(d.get("tags", "[]"))
-                if tag not in tags:
-                    continue
-            results.append(d)
-        response.headers["X-Total-Count"] = str(len(results))
-        return results[offset:offset + limit]
+        if tag:
+            # Push tag filter into SQL via json_each so LIMIT/OFFSET operate on
+            # the filtered set rather than the raw full table.
+            base += " AND EXISTS (SELECT 1 FROM json_each(m.tags) t WHERE t.value=?)"
+            params.append(tag)
+
+        # Total count (for pagination headers) — separate cheap query before LIMIT
+        count_rows = await conn.execute_fetchall(f"SELECT COUNT(*) AS n {base}", params)
+        total = count_rows[0]["n"] if count_rows else 0
+        response.headers["X-Total-Count"] = str(total)
+
+        rows = await conn.execute_fetchall(
+            f"SELECT m.*, p.name AS project_name {base}"
+            " ORDER BY m.priority DESC, m.created_at DESC LIMIT ? OFFSET ?",
+            params + [limit, offset],
+        )
+        return [dict(r) for r in rows]
     finally:
         await conn.close()
 
@@ -2903,6 +2905,10 @@ async def get_status_page(project_id: str = Query(None)):
                 "SELECT * FROM monitored_services ORDER BY group_name, name"
             )
 
+        # Batch-fetch status for all services in 5 queries instead of N * 5
+        service_ids = [r["id"] for r in services]
+        status_bulk = await health_checker.get_service_status_bulk(service_ids)
+
         groups = {}
         total = 0
         up_count = 0
@@ -2911,9 +2917,8 @@ async def get_status_page(project_id: str = Query(None)):
 
         for row in services:
             svc = dict(row)
-            status_data = await health_checker.get_service_status(svc["id"])
+            svc.update(status_bulk.get(svc["id"], {"status": "unknown"}))
             uptime_bars = await health_checker.get_uptime_bars(svc["id"])
-            svc.update(status_data)
             svc["uptime_bars"] = uptime_bars
 
             group = svc.get("group_name") or "Default"

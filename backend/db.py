@@ -34,7 +34,11 @@ CREATE TABLE IF NOT EXISTS missions (
     schedule_cron TEXT,
     schedule_enabled INTEGER DEFAULT 0,
     last_scheduled_at TEXT,
-    mission_number INTEGER
+    mission_number INTEGER,
+    lane TEXT DEFAULT '',
+    created_by_email TEXT DEFAULT '',
+    created_by_name TEXT DEFAULT '',
+    is_chat_turn INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS agent_sessions (
