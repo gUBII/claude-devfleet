@@ -2332,8 +2332,13 @@ class PlanIntelligentRequest(BaseModel):
 
 
 @app.post("/api/plan-intelligent", status_code=201)
-async def api_plan_intelligent(body: PlanIntelligentRequest):
-    """Enhanced project planner using extended thinking for better mission breaking."""
+async def api_plan_intelligent(body: PlanIntelligentRequest, response: Response):
+    """Enhanced project planner using extended thinking for better mission breaking.
+
+    DEPRECATED — use POST /api/plan instead. This endpoint is retained for
+    backward compatibility and will be removed 2026-09-01.
+    """
+    response.headers["X-Deprecated"] = "use /api/plan instead; removal 2026-09-01"
     project_path = body.project_path
     if not project_path:
         import re
