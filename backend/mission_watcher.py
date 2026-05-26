@@ -47,7 +47,13 @@ def wake() -> None:
 
 
 async def _find_eligible_missions(lane_capacity: dict[str, int]) -> list[dict]:
-    """Find auto_dispatch missions whose dependencies are all completed and whose target lane has capacity."""
+    """Find auto_dispatch missions whose dependencies are all in terminal states
+    (at least one completed, none still pending) and whose target lane has capacity.
+
+    Eligibility: all deps in (completed, failed, cancelled) AND at least one completed.
+    A dep stuck in failed/cancelled no longer blocks forever — children see it and
+    the operator can decide whether to retry or abort.
+    """
     from lanes import derive_lane
     conn = await db.get_db()
     try:
@@ -61,6 +67,13 @@ async def _find_eligible_missions(lane_capacity: dict[str, int]) -> list[dict]:
                  AND NOT EXISTS (
                    SELECT 1 FROM json_each(m.depends_on) dep
                    WHERE dep.value NOT IN (
+                     SELECT id FROM missions
+                     WHERE status IN ('completed', 'failed', 'cancelled')
+                   )
+                 )
+                 AND EXISTS (
+                   SELECT 1 FROM json_each(m.depends_on) dep
+                   WHERE dep.value IN (
                      SELECT id FROM missions WHERE status = 'completed'
                    )
                  )
@@ -147,7 +160,28 @@ async def _dispatch_eligible(mission: dict):
 
     log.info("Auto-dispatching mission '%s' (session %s)", mission["title"], session_id)
 
-    task = asyncio.create_task(dispatch_mission(session_id, mission, last_report))
+    # Resolve the creator's GitHub PAT so auto-dispatched agents commit with proper identity
+    github_token = None
+    created_by_email = mission.get("created_by_email") or ""
+    if created_by_email:
+        try:
+            import auth as _auth_mod
+            import db as _db
+            _conn = await _db.get_db()
+            try:
+                _rows = await _conn.execute_fetchall(
+                    "SELECT id FROM users WHERE email=?", (created_by_email,)
+                )
+                if _rows:
+                    _gh_result = await _auth_mod.get_github_token(_rows[0]["id"])
+                    if _gh_result:
+                        github_token = _gh_result[0]  # tuple: (token, github_username)
+            finally:
+                await _conn.close()
+        except Exception as exc:
+            log.warning("Could not resolve github_token for auto-dispatch (email=%s): %s", created_by_email, exc)
+
+    task = asyncio.create_task(dispatch_mission(session_id, mission, last_report, github_token=github_token))
     running_tasks[session_id] = task
 
 

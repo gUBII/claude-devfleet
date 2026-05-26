@@ -158,9 +158,15 @@ app.add_middleware(SecurityHeadersMiddleware)
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: _StarletteRequest, call_next):
         request.state.user = None
+        token = None
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[7:]
+        if not token:
+            # Browser EventSource cannot set custom headers — accept ?token= query param
+            # so SSE endpoints (/api/events, /api/sessions/{sid}/stream) work in browsers.
+            token = request.query_params.get("token", "")
+        if token:
             try:
                 from auth import decode_token
                 request.state.user = decode_token(token)
@@ -690,9 +696,9 @@ async def hitl_ask(sid: str, body: HitlAskRequest, request: Request):
                 mission_id = row[0]["mission_id"]
             if mission_id:
                 await conn.execute(
-                    "INSERT INTO mission_events (id, mission_id, event_type, data, created_at) "
-                    "VALUES (?, ?, 'hitl_timeout_cancelled', ?, datetime('now'))",
-                    (str(uuid.uuid4()), mission_id, json.dumps({"session_id": sid, "question": body.question})),
+                    "INSERT INTO mission_events (mission_id, event_type, data, created_at) "
+                    "VALUES (?, 'hitl_timeout_cancelled', ?, datetime('now'))",
+                    (mission_id, json.dumps({"session_id": sid, "question": body.question})),
                 )
             await conn.commit()
         finally:
@@ -1458,7 +1464,10 @@ async def delete_mission(mid: str):
 # ──────────────────────────────────────────────
 
 @app.post("/api/missions/{mid}/generate-next")
-async def generate_next_mission(mid: str):
+async def generate_next_mission(mid: str, request: Request):
+    _gen_user = getattr(request.state, "user", None)
+    if not _gen_user:
+        raise HTTPException(401, "Authentication required")
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall(
@@ -1528,13 +1537,23 @@ async def generate_next_mission(mid: str):
             (mission["project_id"],),
         )
         next_num = num_rows[0][0] if num_rows else 1
+        parent_model = mission.get("model") or "claude-sonnet-4-6"
+        parent_lane = mission.get("lane") or ""
+        from models import MISSION_TYPE_TO_LANE
+        parent_mission_type = mission.get("mission_type") or "implement"
+        if not parent_lane:
+            parent_lane = MISSION_TYPE_TO_LANE.get(parent_mission_type, "")
         await conn.execute(
-            """INSERT INTO missions (id, project_id, title, detailed_prompt, acceptance_criteria, priority, tags, mission_number)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO missions (id, project_id, title, detailed_prompt, acceptance_criteria,
+                                    priority, tags, mission_number, model, lane, mission_type,
+                                    created_by_email, created_by_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (new_id, mission["project_id"], new_title,
              "\n".join(prompt_parts),
              "\n".join(criteria_parts) if criteria_parts else "",
-             mission.get("priority", 0), tags, next_num),
+             mission.get("priority", 0), tags, next_num,
+             parent_model, parent_lane, parent_mission_type,
+             _gen_user.get("email", ""), _gen_user.get("email", "").split("@")[0]),
         )
         await conn.commit()
 
@@ -1740,6 +1759,9 @@ async def fleet_summary():
 
 @app.post("/api/missions/{mid}/dispatch")
 async def dispatch(request: Request, mid: str, body: DispatchOptions | None = None):
+    _dispatch_caller = getattr(request.state, "user", None)
+    if not _dispatch_caller:
+        raise HTTPException(401, "Authentication required")
     running_count = sum(1 for t in running_tasks.values() if not t.done())
     if MAX_CONCURRENT_AGENTS > 0 and running_count >= MAX_CONCURRENT_AGENTS:
         raise HTTPException(429, f"Global agent ceiling reached ({running_count}/{MAX_CONCURRENT_AGENTS}) — wait for a slot")
@@ -1783,15 +1805,14 @@ async def dispatch(request: Request, mid: str, body: DispatchOptions | None = No
     finally:
         await conn.close()
 
-    # Look up calling user's GitHub token (if they have one stored)
+    # Look up calling user's GitHub token (Fernet-decrypted — never read the legacy plaintext column)
     _dispatch_user = getattr(request.state, "user", None)
     _github_token = None
     if _dispatch_user:
-        _gh_rows = await (await (await db.get_db()).execute(
-            "SELECT github_token FROM users WHERE id=?", (_dispatch_user.get("sub"),)
-        )).fetchone()
-        if _gh_rows and _gh_rows[0]:
-            _github_token = _gh_rows[0]
+        import auth as _auth_mod
+        _gh_result = await _auth_mod.get_github_token(_dispatch_user.get("sub"))
+        if _gh_result:
+            _github_token = _gh_result[0]  # tuple: (token, github_username)
 
     task = asyncio.create_task(
         dispatch_mission(session_id, mission, last_report, opts=body, github_token=_github_token)
@@ -2037,7 +2058,10 @@ async def get_session(sid: str):
 
 
 @app.get("/api/sessions/{sid}/stream")
-async def stream_session(sid: str):
+async def stream_session(sid: str, request: Request):
+    _stream_user = getattr(request.state, "user", None)
+    if not _stream_user:
+        raise HTTPException(401, "Authentication required")
     if USE_SDK_ENGINE:
         from sdk_engine import subscribe_session
     else:
@@ -2051,7 +2075,10 @@ async def stream_session(sid: str):
 
 
 @app.post("/api/sessions/{sid}/cancel")
-async def cancel(sid: str):
+async def cancel(sid: str, request: Request):
+    _cancel_user = getattr(request.state, "user", None)
+    if not _cancel_user:
+        raise HTTPException(401, "Authentication required")
     result = await cancel_session(sid)
     if not result:
         raise HTTPException(404, "Session not running")
@@ -2728,8 +2755,11 @@ async def list_remote():
 
 
 @app.get("/api/sessions/{sid}/remote-stream")
-async def stream_remote(sid: str):
+async def stream_remote(sid: str, request: Request):
     """SSE stream of live remote-control process output."""
+    _rs_user = getattr(request.state, "user", None)
+    if not _rs_user:
+        raise HTTPException(401, "Authentication required")
     if not ENABLE_REMOTE_CONTROL:
         raise HTTPException(501, "Remote control is not enabled")
     async def event_stream():
@@ -3101,7 +3131,10 @@ async def list_mcp_servers(pid: str):
 
 
 @app.post("/api/projects/{pid}/mcp-servers", status_code=201)
-async def add_mcp_server(pid: str, body: McpServerCreate):
+async def add_mcp_server(pid: str, body: McpServerCreate, request: Request):
+    _mcp_user = getattr(request.state, "user", None)
+    if not _mcp_user:
+        raise HTTPException(401, "Authentication required")
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall("SELECT id FROM projects WHERE id=?", (pid,))
@@ -3123,7 +3156,10 @@ async def add_mcp_server(pid: str, body: McpServerCreate):
 
 
 @app.delete("/api/mcp-servers/{mid}", status_code=204)
-async def delete_mcp_server(mid: str):
+async def delete_mcp_server(mid: str, request: Request):
+    _mcp_user = getattr(request.state, "user", None)
+    if not _mcp_user:
+        raise HTTPException(401, "Authentication required")
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall("SELECT * FROM mcp_configs WHERE id=?", (mid,))
