@@ -278,6 +278,9 @@ export const changePassword = ({ current_password, new_password }) =>
     body: JSON.stringify({ current_password, new_password }),
   });
 
+// ── Dev Profiles (public leaderboard) ─────────────────────────────────────────
+export const listDevProfiles = () => request('/dev-profiles');
+
 // ── Project Bot (Moofasa) ─────────────────────────────────────────────────────
 export const getBotHistory = (projectId) => request(`/projects/${projectId}/bot-history`);
 

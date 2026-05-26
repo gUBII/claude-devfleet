@@ -19,6 +19,7 @@ import uuid
 from datetime import datetime, timezone
 
 from db import get_db
+from model_router import route_missions
 
 log = logging.getLogger("devfleet.planner")
 
@@ -120,12 +121,23 @@ async def _call_planner(prompt: str, cwd: str) -> str:
         return stdout.decode().strip()
 
 
-async def plan_project(user_prompt: str, project_path: str) -> dict:
+async def plan_project(
+    user_prompt: str,
+    project_path: str,
+    *,
+    enable_model_routing: bool = True,
+    created_by_email: str | None = None,
+) -> dict:
     """
     Take a natural language prompt, use Claude to plan the project,
     and create everything in the database.
 
-    Returns: {"project": {...}, "missions": [...]}
+    When `enable_model_routing` is True (default), each mission is classified
+    by model_router.route_missions and assigned its tier-appropriate model
+    instead of defaulting to Sonnet. The result dict gains `model_routing`
+    with the per-phase map and estimated dollar savings vs all-Sonnet.
+
+    Returns: {"project": {...}, "missions": [...], "model_routing": {...}|None}
     """
     # Ensure project path exists
     os.makedirs(project_path, exist_ok=True)
@@ -192,6 +204,19 @@ async def plan_project(user_prompt: str, project_path: str) -> dict:
     if not plan["missions"]:
         raise ValueError("Plan has no missions")
 
+    # Classify each mission's difficulty and pick the cheapest viable model.
+    # Falls back to sonnet for every mission when routing is disabled, which
+    # preserves the pre-Feature-1 behaviour exactly.
+    if enable_model_routing:
+        decisions, dollars_saved = route_missions(plan["missions"])
+    else:
+        decisions, dollars_saved = ([], 0.0)
+
+    def _model_for(idx: int) -> str:
+        if enable_model_routing and idx < len(decisions):
+            return decisions[idx].model
+        return "claude-sonnet-4-6"
+
     # Create project in DB
     project_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -229,19 +254,23 @@ async def plan_project(user_prompt: str, project_path: str) -> dict:
 
             tags = json.dumps(m.get("tags", []))
 
+            chosen_model = _model_for(i)
             await conn.execute(
                 """INSERT INTO missions
                    (id, project_id, title, detailed_prompt, acceptance_criteria,
                     status, priority, tags, model, mission_type,
-                    depends_on, auto_dispatch, mission_number, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, 'claude-sonnet-4-6', ?, ?, ?, ?, ?, ?)""",
+                    depends_on, auto_dispatch, mission_number, created_at, updated_at,
+                    created_by_email)
+                   VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     mission_id, project_id,
                     m["title"], m["detailed_prompt"], m.get("acceptance_criteria", ""),
                     m.get("priority", 1), tags,
+                    chosen_model,
                     m.get("mission_type", "implement"),
                     json.dumps(depends_on), auto_dispatch, mission_number,
                     now, now,
+                    created_by_email or None,
                 ),
             )
 
@@ -252,13 +281,34 @@ async def plan_project(user_prompt: str, project_path: str) -> dict:
                 "mission_type": m.get("mission_type", "implement"),
                 "depends_on": depends_on,
                 "auto_dispatch": bool(auto_dispatch),
+                "model": chosen_model,
             })
 
         await conn.commit()
     finally:
         await conn.close()
 
-    log.info("Created project '%s' with %d missions", plan["project_name"], len(created_missions))
+    log.info(
+        "Created project '%s' with %d missions (routing=%s, saved ≈ $%.2f)",
+        plan["project_name"], len(created_missions),
+        enable_model_routing, dollars_saved,
+    )
+
+    model_routing = None
+    if enable_model_routing and decisions:
+        model_routing = {
+            "enabled": True,
+            "phases": [
+                {
+                    "mission_id": mid,
+                    "tier": d.tier,
+                    "model": d.model,
+                    "reason": d.reason,
+                }
+                for mid, d in zip([cm["id"] for cm in created_missions], decisions)
+            ],
+            "dollars_saved_vs_sonnet": round(dollars_saved, 4),
+        }
 
     return {
         "project": {
@@ -268,4 +318,5 @@ async def plan_project(user_prompt: str, project_path: str) -> dict:
             "description": plan.get("project_description", ""),
         },
         "missions": created_missions,
+        "model_routing": model_routing,
     }

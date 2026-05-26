@@ -763,6 +763,19 @@ async def _run_agent(
         }))
         log.info("Session %s completed (cost $%.4f, tokens %d)", session_id, total_cost, total_tokens)
 
+        # Feature 2: credit the dev for a successful chat-driven PR merge.
+        # No-op when the session wasn't a chat git_operator turn or the
+        # intent wasn't pr_merge. Wrapped so failure can't break the dispatch.
+        try:
+            import dev_metrics
+            await dev_metrics.credit_chat_pr_merge_if_eligible(
+                session_id, succeeded=True, output_log=full_output,
+            )
+        except Exception:
+            log.exception(
+                "Failed to credit chat PR merge for session %s", session_id
+            )
+
     except asyncio.CancelledError:
         watchdog_task.cancel()
         is_takeover = session_id in _takeover_sessions
@@ -838,6 +851,19 @@ async def _run_agent(
                 "UPDATE missions SET status='failed', updated_at=? WHERE id=?",
                 (ended_at, mission["id"]),
             )
+            # Feature 2: failed chat PR merge resets the dev's clean streak.
+            # Same eligibility filter as the success path — only fires for
+            # chat git_operator turns with intent=pr_merge.
+            try:
+                import dev_metrics
+                await dev_metrics.credit_chat_pr_merge_if_eligible(
+                    session_id, succeeded=False, output_log=full_output,
+                )
+            except Exception:
+                log.exception(
+                    "Failed to reset chat PR merge streak for session %s",
+                    session_id,
+                )
             # Record failure layer for observability and downstream classification
             await conn.execute(
                 "INSERT INTO mission_events (mission_id, event_type, data, failure_layer) VALUES (?, ?, ?, ?)",
