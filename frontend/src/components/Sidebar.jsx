@@ -46,8 +46,8 @@ export default function Sidebar({ activePage, navigate, agentDelta = 0 }) {
   return (
     <aside className="sidebar">
       <div className="sidebar-logo">
-        <BrandMark size="md" />
-        <p className="sidebar-logo__meta">v2026.05  ·  Powered by Claude Code</p>
+        <BrandMark size="sm" />
+        <p className="sidebar-logo__meta">v2026.05  ·  Workstation</p>
       </div>
 
       <nav className="sidebar-nav">

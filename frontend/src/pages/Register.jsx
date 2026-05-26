@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { register as registerApi } from '../api/client';
 import { useAuth } from '../auth';
+import BrandMark from '../components/BrandMark';
 
 export default function Register({ navigate, inviteToken: propToken }) {
   const { login } = useAuth();
@@ -32,7 +33,9 @@ export default function Register({ navigate, inviteToken: propToken }) {
   return (
     <div className="auth-page">
       <div className="auth-card">
-        <div className="auth-logo">⚡ DevFleet</div>
+        <div className="auth-logo" style={{ display: 'flex', justifyContent: 'center', marginBottom: 10 }}>
+          <BrandMark size="md" />
+        </div>
         <h1 className="auth-title">Create account</h1>
         {error && <div className="auth-error">{error}</div>}
         <form onSubmit={handleSubmit} className="auth-form">

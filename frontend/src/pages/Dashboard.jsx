@@ -193,18 +193,23 @@ export default function Dashboard({ navigate }) {
         </div>
       )}
 
-      {/* ── Stat row ── */}
+      {/* ── KPI strip — RAG/neutral only ── */}
       <div className="dash-stats">
         {[
-          { label: 'Projects',   val: missions.length ? [...new Set(missions.map(m => m.project_id))].length : '—', color: '#58a6ff', click: 'projects' },
-          { label: 'Missions',   val: missions.length, color: '#58a6ff', click: 'missions' },
-          { label: 'Completed',  val: byStatus.completed || 0, color: '#3fb950', click: 'missions' },
-          { label: 'Running',    val: summary.running_agents, color: '#f0a84b', click: 'missions' },
-          { label: 'Free Slots', val: summary.free_slots, color: '#8b949e', click: 'fleet-config' },
-          { label: 'Cost Today', val: fmt(summary.cost_today_usd), color: '#bc8cff', click: null },
-        ].map(({ label, val, color, click }) => (
-          <div key={label} className="dash-stat-card" onClick={click ? () => navigate(click) : undefined} style={{ cursor: click ? 'pointer' : 'default' }}>
-            <div className="dash-stat-val" style={{ color }}>{val}</div>
+          { label: 'Projects',   val: missions.length ? [...new Set(missions.map(m => m.project_id))].length : 0, tone: 'neutral', click: 'projects' },
+          { label: 'Missions',   val: missions.length, tone: 'neutral', click: 'missions' },
+          { label: 'Completed',  val: byStatus.completed || 0, tone: 'g', click: 'missions' },
+          { label: 'Running',    val: summary.running_agents, tone: summary.running_agents > 0 ? 'a' : 'neutral', click: 'missions' },
+          { label: 'Free Slots', val: summary.free_slots ?? 0, tone: 'neutral', click: 'fleet-config' },
+          { label: 'Cost Today', val: fmt(summary.cost_today_usd), tone: 'neutral', click: null },
+        ].map(({ label, val, tone, click }) => (
+          <div
+            key={label}
+            className={`dash-stat-card dash-stat-card--${tone}`}
+            onClick={click ? () => navigate(click) : undefined}
+            style={{ cursor: click ? 'pointer' : 'default' }}
+          >
+            <div className="dash-stat-val">{val}</div>
             <div className="dash-stat-label">{label}</div>
           </div>
         ))}

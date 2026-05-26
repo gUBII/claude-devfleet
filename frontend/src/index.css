@@ -115,8 +115,32 @@ body {
 }
 
 .sidebar-logo {
-  padding: 18px 18px 14px;
+  padding: 18px 16px 16px;
   border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+.sidebar-logo__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.sidebar-logo__row svg { flex-shrink: 0; color: var(--brand-mark); }
+.sidebar-logo__title {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.05;
+  min-width: 0;
+}
+.sidebar-logo__brand {
+  font-family: 'Space Mono', var(--font-mono);
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.sidebar-logo__brand--accent {
+  color: var(--brand-mark);
 }
 
 .sidebar-logo__meta {
@@ -2240,37 +2264,50 @@ body {
 /* ── Sidebar user section ────────────────────────────────────────────────── */
 .sidebar-user-section {
   padding: 12px 16px;
-  border-top: 1px solid rgba(255,255,255,0.08);
+  border-top: 1px solid var(--border);
   margin-top: auto;
   flex-shrink: 0;
+  font-family: var(--font-mono);
 }
 .sidebar-user-email {
   font-size: 11px;
-  color: #888;
+  color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   margin-bottom: 4px;
+  letter-spacing: 0.02em;
 }
 .sidebar-user-role {
-  font-size: 10px;
-  color: #b44ff7;
+  display: inline-block;
+  font-size: 9.5px;
+  color: var(--brand-mark);
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.18em;
   margin-bottom: 8px;
+  padding: 2px 6px;
+  border: 1px solid var(--brand-mark);
+  background: var(--rag-a-soft);
 }
 .sidebar-logout {
   width: 100%;
-  padding: 6px 8px;
+  padding: 7px 10px;
   background: transparent;
-  border: 1px solid rgba(255,255,255,0.1);
-  border-radius: 6px;
-  color: #666;
-  font-size: 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 0;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
   cursor: pointer;
-  transition: border-color 150ms, color 150ms;
+  transition: all 0.12s;
 }
-.sidebar-logout:hover { border-color: rgba(255,255,255,0.25); color: #aaa; }
+.sidebar-logout:hover {
+  border-color: var(--text-primary);
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
 
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(8px); }
@@ -3194,3 +3231,102 @@ body {
   color: var(--text-muted);
   letter-spacing: 0.06em;
 }
+
+/* ── Compact heading variant (Mission Board, sub-pages) ── */
+.ws-heading--compact {
+  padding-top: clamp(28px, 4vw, 44px);
+  padding-bottom: clamp(14px, 2vw, 24px);
+}
+.ws-heading--compact .ws-h1 {
+  font-size: clamp(24px, 4vw + 4px, 52px);
+}
+
+/* ── Workstation select (matches button styling) ── */
+.ws-select {
+  padding: 9px clamp(11px, 1.2vw, 18px);
+  padding-right: 32px;
+  font-family: var(--font-mono);
+  font-size: clamp(10px, 0.5vw + 7.5px, 11.5px);
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+  transition: all 0.12s ease;
+  border-radius: 0;
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-secondary) 50%),
+                    linear-gradient(135deg, var(--text-secondary) 50%, transparent 50%);
+  background-position: calc(100% - 16px) calc(50% - 2px),
+                       calc(100% - 11px) calc(50% - 2px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+.ws-select:hover { border-color: var(--text-primary); background-color: var(--bg-hover); }
+
+/* ── Workstation tabs (re-skin filter-tabs in ws context) ── */
+.ws .filter-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 0 var(--ws-pad-x);
+  margin: 0;
+  overflow-x: auto;
+}
+.ws .filter-tab {
+  font-family: var(--font-mono);
+  font-size: clamp(10px, 0.5vw + 7.5px, 12px);
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 14px 18px;
+  border: none;
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.12s;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.ws .filter-tab:hover { color: var(--text-primary); }
+.ws .filter-tab.active {
+  color: var(--brand-mark);
+  border-bottom-color: var(--brand-mark);
+  background: var(--rag-a-soft);
+}
+.ws .filter-tab .count {
+  font-family: 'Space Mono', var(--font-mono);
+  font-size: 0.85em;
+  padding: 1px 7px;
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: 0;
+}
+.ws .filter-tab.active .count {
+  background: var(--brand-mark);
+  color: #1a1408;
+  border-color: var(--brand-mark);
+}
+
+/* Padding for cards/list under tabs */
+.ws > .flex.flex-col.gap-8,
+.ws > .empty-state {
+  padding: var(--ws-pad-y) var(--ws-pad-x);
+}
+
+/* ── Stat-card tone variants — RAG only ── */
+.ws .dash-stat-card .dash-stat-val { color: var(--text-primary); }
+.ws .dash-stat-card--g .dash-stat-val { color: var(--rag-g); }
+.ws .dash-stat-card--a .dash-stat-val { color: var(--rag-a); }
+.ws .dash-stat-card--r .dash-stat-val { color: var(--rag-r); }
+.ws .dash-stat-card--neutral .dash-stat-val { color: var(--text-primary); }
+
+/* Override the stale `style={{color}}` inline still on .dash-stat-val */
+.ws .dash-stat-card[style*="cursor"] .dash-stat-val { color: inherit; }
