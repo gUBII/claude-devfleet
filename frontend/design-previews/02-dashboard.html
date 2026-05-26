@@ -1,0 +1,856 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FARHAN'S DEVFLEET™ // WORKSTATION</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  /* ───────────────────────── TOKENS ───────────────────────── */
+  :root {
+    /* Surface */
+    --bg:        #0a0c0a;
+    --bg-2:      #0f130f;
+    --bg-3:      #161c16;
+    --bg-4:      #1c241c;
+    --line:      #1f2920;
+    --line-2:    #2a3829;
+    --line-hot:  #3a4d38;
+
+    /* Ink */
+    --ink:       #d6dccf;
+    --ink-2:     #8a9482;
+    --ink-3:     #525c4d;
+    --ink-4:     #2f3a2c;
+
+    /* RAG — used ONLY for agent / mission / service state */
+    --rag-r:     #d36359;       /* failed · blocked · incident */
+    --rag-a:     #d4a017;       /* running · transitioning · warn */
+    --rag-g:     #6ea358;       /* healthy · completed · ok */
+    --rag-r-soft:rgba(211,99,89,0.12);
+    --rag-a-soft:rgba(212,160,23,0.12);
+    --rag-g-soft:rgba(110,163,88,0.12);
+
+    /* Single neutral accent for primary actions */
+    --primary:   var(--rag-a);  /* amber doubles as the action accent */
+
+    /* Fluid scale — every key dimension is clamp() so the UI compresses
+       cleanly from a 320px phone to an ultrawide. */
+    --fs-body:    clamp(12px, 0.85vw + 7px, 14px);
+    --fs-meta:    clamp(10px, 0.45vw + 7.5px, 11.5px);
+    --fs-h2:      clamp(15px, 0.85vw + 11px, 20px);
+    --fs-h1:      clamp(28px, 5vw + 6px, 76px);
+    --fs-kpi:     clamp(26px, 3.5vw + 8px, 52px);
+
+    --pad-block:  clamp(16px, 2vw, 28px);
+    --pad-x:      clamp(16px, 2.2vw, 32px);
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: var(--fs-body);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Subtle scanline + paper-noise overlay (workshop, not arcade) */
+  body::before {
+    content: "";
+    position: fixed; inset: 0;
+    pointer-events: none;
+    z-index: 200;
+    background:
+      repeating-linear-gradient(0deg,
+        rgba(212, 160, 23, 0.014) 0px,
+        rgba(212, 160, 23, 0.014) 1px,
+        transparent 1px,
+        transparent 3px),
+      radial-gradient(ellipse at center,
+        transparent 0%,
+        rgba(0,0,0,0.4) 100%);
+  }
+  body::after {
+    content: "";
+    position: fixed; inset: 0;
+    pointer-events: none;
+    z-index: 199;
+    opacity: 0.5;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/><feColorMatrix values='0 0 0 0 0.7 0 0 0 0 0.7 0 0 0 0 0.6 0 0 0 0.045 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  }
+
+  /* ───────────────────────── TOP MAST ───────────────────────── */
+  .mast {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: clamp(12px, 1.6vw, 24px);
+    align-items: center;
+    padding: 12px var(--pad-x);
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, var(--bg-2) 0%, var(--bg) 100%);
+    position: sticky; top: 0; z-index: 100;
+    backdrop-filter: blur(8px);
+  }
+  .brand {
+    display: flex; align-items: center; gap: 12px;
+    font-family: "Space Mono", monospace;
+    font-weight: 700;
+    font-size: clamp(13px, 0.9vw + 9px, 16px);
+    letter-spacing: 0.02em;
+    color: var(--primary);
+    white-space: nowrap;
+  }
+  .brand::before {
+    content: "▌▍▎▏";
+    color: var(--primary);
+    letter-spacing: -2px;
+    font-size: 1.2em;
+  }
+  .brand .ver {
+    color: var(--ink-3);
+    font-size: 0.7em;
+    letter-spacing: 0.2em;
+    margin-left: 6px;
+  }
+
+  /* Command palette (single source of action discoverability) */
+  .cmd {
+    flex: 1;
+    max-width: 480px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    background: var(--bg-3);
+    border: 1px solid var(--line);
+    color: var(--ink-2);
+    font-size: var(--fs-meta);
+    letter-spacing: 0.04em;
+    cursor: text;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .cmd:hover, .cmd:focus-within {
+    border-color: var(--primary);
+    background: var(--bg-4);
+  }
+  .cmd .icon {
+    width: 12px; height: 12px;
+    border: 1.4px solid currentColor;
+    border-radius: 50%;
+    position: relative;
+  }
+  .cmd .icon::after {
+    content: "";
+    position: absolute; right: -3px; bottom: -3px;
+    width: 6px; height: 1.4px;
+    background: currentColor;
+    transform: rotate(45deg);
+    transform-origin: left center;
+  }
+  .cmd .prompt { flex: 1; text-transform: uppercase; }
+  .cmd kbd {
+    font-family: inherit;
+    font-size: 9.5px;
+    padding: 2px 6px;
+    border: 1px solid var(--line-2);
+    color: var(--ink-3);
+    background: var(--bg-2);
+  }
+
+  .mast-right {
+    display: flex; align-items: center;
+    gap: clamp(8px, 1vw, 18px);
+    font-size: var(--fs-meta);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-2);
+  }
+  .live {
+    color: var(--primary);
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .live::before {
+    content: "";
+    width: 6px; height: 6px;
+    background: var(--primary);
+    border-radius: 50%;
+    box-shadow: 0 0 10px var(--primary);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.3; } }
+  .mast-right .user {
+    padding-left: clamp(8px, 1vw, 16px);
+    border-left: 1px solid var(--line);
+    color: var(--ink);
+  }
+  .mast-right .clock { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  /* ───────────────────────── ACTION TOOLBAR ───────────────────────── */
+  .toolbar {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: clamp(12px, 1.5vw, 24px);
+    align-items: center;
+    padding: 14px var(--pad-x);
+    background: var(--bg-2);
+    border-bottom: 1px solid var(--line);
+  }
+  .crumb {
+    display: flex; gap: 10px; align-items: center;
+    font-size: var(--fs-meta);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-2);
+    flex-wrap: wrap;
+  }
+  .crumb b { color: var(--ink); font-weight: 600; }
+  .crumb .sep { color: var(--ink-4); }
+  .crumb .pill {
+    padding: 3px 8px;
+    background: var(--rag-g-soft);
+    color: var(--rag-g);
+    border: 1px solid var(--rag-g);
+    font-size: 10px;
+  }
+
+  .actions {
+    display: flex;
+    gap: clamp(6px, 0.8vw, 12px);
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  /* Buttons — distinct hierarchy, sharp corners, visible keybinds */
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 9px clamp(11px, 1.2vw, 18px);
+    font-family: inherit;
+    font-size: var(--fs-meta);
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    background: transparent;
+    color: var(--ink);
+    border: 1px solid var(--line-2);
+    cursor: pointer;
+    transition: all 0.12s ease;
+    position: relative;
+    white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--ink); background: var(--bg-3); }
+  .btn:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+  .btn kbd {
+    font-family: inherit;
+    font-size: 9.5px;
+    padding: 1px 5px;
+    color: var(--ink-3);
+    border: 1px solid var(--line-2);
+    background: var(--bg);
+    margin-left: 2px;
+  }
+  /* PRIMARY — filled amber, dark ink */
+  .btn--primary {
+    background: var(--primary);
+    color: #1a1408;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 0 var(--primary);
+  }
+  .btn--primary:hover {
+    background: #e8b820;
+    border-color: #e8b820;
+    box-shadow: 0 0 14px rgba(212, 160, 23, 0.45);
+    transform: translateY(-1px);
+  }
+  .btn--primary kbd { background: rgba(0,0,0,0.18); color: rgba(0,0,0,0.7); border-color: rgba(0,0,0,0.2); }
+  /* DANGER */
+  .btn--danger { color: var(--rag-r); border-color: var(--rag-r); }
+  .btn--danger:hover {
+    background: var(--rag-r);
+    color: var(--bg);
+    border-color: var(--rag-r);
+    box-shadow: 0 0 12px rgba(211, 99, 89, 0.4);
+  }
+  /* GHOST · success-tinted (for "complete" / "ship" actions) */
+  .btn--ghost-g { color: var(--rag-g); border-color: var(--line-hot); }
+  .btn--ghost-g:hover { background: var(--rag-g-soft); border-color: var(--rag-g); }
+
+  /* ───────────────────────── HEADING ───────────────────────── */
+  .heading {
+    padding: clamp(36px, 5vw, 64px) var(--pad-x) clamp(20px, 2.5vw, 32px);
+    border-bottom: 1px solid var(--line);
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: clamp(20px, 3vw, 48px);
+    align-items: end;
+  }
+  .heading .pre {
+    color: var(--primary);
+    font-size: var(--fs-meta);
+    letter-spacing: 0.32em;
+    margin-bottom: 14px;
+    text-transform: uppercase;
+  }
+  .heading h1 {
+    margin: 0;
+    font-family: "Space Mono", monospace;
+    font-weight: 700;
+    font-size: var(--fs-h1);
+    line-height: 0.95;
+    letter-spacing: -0.04em;
+    color: var(--ink);
+  }
+  .heading h1 .dim { color: var(--ink-3); }
+  .heading h1 .accent { color: var(--primary); }
+  .heading .corner {
+    text-align: right;
+    color: var(--ink-3);
+    font-size: var(--fs-meta);
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    line-height: 1.7;
+    min-width: 0;
+  }
+  .heading .corner b { color: var(--primary); font-weight: 500; }
+  .heading .corner .ok { color: var(--rag-g); }
+
+  /* ───────────────────────── KPIs ───────────────────────── */
+  .kpis {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    border-bottom: 1px solid var(--line);
+  }
+  .kpi {
+    padding: clamp(18px, 2vw, 26px) var(--pad-x);
+    border-right: 1px solid var(--line);
+    position: relative;
+    transition: background 0.2s;
+  }
+  .kpi:hover { background: var(--bg-2); }
+  .kpi .label {
+    color: var(--ink-3);
+    font-size: var(--fs-meta);
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .kpi .label .badge {
+    color: var(--primary);
+    font-weight: 600;
+    border-left: 1px solid var(--line-2);
+    padding-left: 8px;
+  }
+  .kpi .value {
+    font-family: "Space Mono", monospace;
+    font-weight: 700;
+    font-size: var(--fs-kpi);
+    line-height: 1;
+    letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+    margin-bottom: 8px;
+  }
+  .kpi .value.amber { color: var(--primary); }
+  .kpi .value.green { color: var(--rag-g); }
+  .kpi .meta {
+    font-size: var(--fs-meta);
+    color: var(--ink-2);
+    display: flex; gap: 12px; flex-wrap: wrap;
+  }
+  .kpi .meta .up    { color: var(--rag-g); }
+  .kpi .meta .down  { color: var(--rag-r); }
+  .spark {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 28px;
+    pointer-events: none;
+  }
+  .spark svg { width: 100%; height: 100%; display: block; }
+
+  /* ───────────────────────── MAIN ───────────────────────── */
+  .main {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+  }
+  .panel {
+    padding: var(--pad-block) var(--pad-x);
+    border-right: 1px solid var(--line);
+    min-width: 0;
+  }
+  .panel:last-child { border-right: none; }
+  .panel-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    border-bottom: 1px dashed var(--line-2);
+    padding-bottom: 12px;
+    margin-bottom: 18px;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .panel-head h2 {
+    margin: 0;
+    font-family: "Space Mono", monospace;
+    font-size: var(--fs-h2);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+  }
+  .panel-head h2::before { content: "▌"; color: var(--primary); margin-right: 8px; }
+  .panel-head .count {
+    font-size: var(--fs-meta);
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-2);
+  }
+  .panel-head .count b { color: var(--primary); font-weight: 500; }
+
+  /* Filter chips */
+  .filters {
+    display: flex; gap: 6px; flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .chip {
+    font-family: inherit;
+    font-size: var(--fs-meta);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    padding: 5px 10px;
+    background: transparent;
+    color: var(--ink-2);
+    border: 1px solid var(--line-2);
+    cursor: pointer;
+    transition: all 0.12s;
+  }
+  .chip:hover { border-color: var(--ink-2); color: var(--ink); }
+  .chip.active { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+  .chip .n { color: var(--ink-3); margin-left: 6px; font-weight: 600; }
+  .chip.active .n { color: var(--bg); }
+
+  /* Lane grid — RAG status communicated via left rule */
+  .lanes-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+  }
+  .lane {
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-left-width: 3px;
+    padding: 14px 16px 14px 13px;
+    position: relative;
+    transition: border-color 0.2s, transform 0.2s, background 0.2s;
+  }
+  .lane:hover { background: var(--bg-3); transform: translateY(-1px); }
+  /* Lane RAG: green when slots free, amber when busy, red when full+queue */
+  .lane.rag-g { border-left-color: var(--rag-g); }
+  .lane.rag-a { border-left-color: var(--rag-a); }
+  .lane.rag-r { border-left-color: var(--rag-r); }
+
+  .lane-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 12px; gap: 12px;
+  }
+  .lane .name {
+    font-family: "Space Mono", monospace;
+    font-weight: 700;
+    font-size: clamp(14px, 0.9vw + 9px, 16px);
+    color: var(--ink);
+    letter-spacing: -0.01em;
+  }
+  .lane .ratio {
+    font-family: "Space Mono", monospace;
+    font-size: clamp(15px, 1vw + 9px, 19px);
+    color: var(--primary);
+    font-variant-numeric: tabular-nums;
+  }
+  .lane .ratio .of { color: var(--ink-4); }
+  .lane.rag-g .ratio { color: var(--rag-g); }
+  .lane.rag-r .ratio { color: var(--rag-r); }
+
+  .slots { display: flex; gap: 3px; margin-bottom: 12px; }
+  .slot {
+    flex: 1;
+    height: 5px;
+    background: var(--bg-3);
+    border: 1px solid var(--line);
+  }
+  .slot.active {
+    background: var(--primary);
+    border-color: var(--primary);
+    box-shadow: 0 0 6px rgba(212, 160, 23, 0.5);
+  }
+  .lane.rag-g .slot.active { background: var(--rag-g); border-color: var(--rag-g); box-shadow: 0 0 6px rgba(110,163,88,0.5); }
+  .lane.rag-r .slot.active { background: var(--rag-r); border-color: var(--rag-r); box-shadow: 0 0 6px rgba(211,99,89,0.5); }
+
+  .agent-list { font-size: clamp(11px, 0.6vw + 8px, 12.5px); line-height: 1.7; }
+  .agent {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 8px;
+    align-items: center;
+    padding: 4px 0;
+  }
+  .agent + .agent { border-top: 1px dotted var(--line); }
+  .agent .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--ink-3);
+    flex-shrink: 0;
+  }
+  .agent .dot.g { background: var(--rag-g); box-shadow: 0 0 5px var(--rag-g); }
+  .agent .dot.a { background: var(--rag-a); box-shadow: 0 0 5px var(--rag-a); animation: pulse 1.4s ease-in-out infinite; }
+  .agent .dot.r { background: var(--rag-r); box-shadow: 0 0 5px var(--rag-r); }
+  .agent .id { color: var(--primary); font-weight: 600; }
+  .agent .title { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .agent .runtime { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+
+  /* Right panel queue */
+  .queue .item {
+    display: grid;
+    grid-template-columns: 30px 1fr auto;
+    gap: 12px;
+    padding: 11px 0;
+    border-bottom: 1px dashed var(--line);
+    align-items: center;
+  }
+  .queue .item:last-child { border-bottom: none; }
+  .queue .item .num {
+    font-family: "Space Mono", monospace;
+    color: var(--ink-4);
+    font-size: clamp(14px, 0.9vw + 9px, 18px);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .queue .item .title { font-size: var(--fs-body); color: var(--ink); line-height: 1.35; }
+  .queue .item .meta { font-size: var(--fs-meta); color: var(--ink-2); margin-top: 2px; }
+  .queue .item .status {
+    font-size: 10.5px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    padding: 4px 8px;
+    border: 1px solid currentColor;
+    white-space: nowrap;
+  }
+  .queue .item .status.armed   { color: var(--rag-a); background: var(--rag-a-soft); }
+  .queue .item .status.waiting { color: var(--ink-2); }
+  .queue .item .status.blocked { color: var(--rag-r); background: var(--rag-r-soft); }
+
+  /* ───────────────────────── ACTIVITY ───────────────────────── */
+  .activity {
+    border-top: 1px solid var(--line);
+    background: var(--bg-2);
+    padding: var(--pad-block) var(--pad-x);
+  }
+  .activity-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 14px; gap: 12px; flex-wrap: wrap;
+  }
+  .activity h2 {
+    margin: 0;
+    font-family: "Space Mono", monospace;
+    font-size: var(--fs-h2);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+  }
+  .activity h2::before { content: "▌"; color: var(--primary); margin-right: 8px; }
+  .stream {
+    font-size: clamp(11px, 0.6vw + 8px, 12.5px);
+    line-height: 1.85;
+    color: var(--ink-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .stream .line {
+    display: grid;
+    grid-template-columns: clamp(70px, 8vw, 100px) clamp(80px, 9vw, 110px) clamp(70px, 7vw, 90px) 1fr;
+    gap: clamp(8px, 1vw, 18px);
+    padding: 3px 0;
+    border-bottom: 1px dotted transparent;
+  }
+  .stream .line:hover { border-bottom-color: var(--line); background: var(--bg-3); }
+  .stream .ts   { color: var(--ink-3); }
+  .stream .kind { font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; }
+  .stream .kind.commit   { color: var(--rag-g); }
+  .stream .kind.dispatch { color: var(--primary); }
+  .stream .kind.spawn    { color: var(--primary); }
+  .stream .kind.complete { color: var(--rag-g); }
+  .stream .kind.retry    { color: var(--rag-a); }
+  .stream .kind.failed   { color: var(--rag-r); }
+  .stream .kind.report   { color: var(--ink-2); }
+  .stream .kind.handoff  { color: var(--ink); }
+  .stream .who  { color: var(--ink); }
+  .stream .what { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+  /* ───────────────────────── PAGE-LOAD STAGGER ───────────────────────── */
+  @keyframes fadeUp {
+    0% { opacity: 0; transform: translateY(6px); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+  .kpi, .lane, .queue .item, .stream .line, .heading h1 {
+    animation: fadeUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  .kpi:nth-child(1) { animation-delay: 0.04s; }
+  .kpi:nth-child(2) { animation-delay: 0.08s; }
+  .kpi:nth-child(3) { animation-delay: 0.12s; }
+  .kpi:nth-child(4) { animation-delay: 0.16s; }
+  .kpi:nth-child(5) { animation-delay: 0.20s; }
+  .lane:nth-child(1) { animation-delay: 0.22s; }
+  .lane:nth-child(2) { animation-delay: 0.26s; }
+  .lane:nth-child(3) { animation-delay: 0.30s; }
+  .lane:nth-child(4) { animation-delay: 0.34s; }
+
+  /* ───────────────────────── RESPONSIVE ───────────────────────── */
+  @media (max-width: 1100px) {
+    .main { grid-template-columns: 1fr; }
+    .panel { border-right: none; border-bottom: 1px solid var(--line); }
+  }
+  @media (max-width: 760px) {
+    .toolbar { grid-template-columns: 1fr; }
+    .actions { justify-content: flex-start; }
+    .heading { grid-template-columns: 1fr; }
+    .heading .corner { text-align: left; }
+    .cmd { display: none; }
+    .mast { grid-template-columns: auto 1fr; }
+    .mast-right .user { display: none; }
+    .stream .line { grid-template-columns: 56px 70px 1fr; }
+    .stream .line .who { display: none; }
+  }
+  @media (max-width: 420px) {
+    .kpis { grid-template-columns: 1fr 1fr; }
+    .btn kbd { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<header class="mast">
+  <div class="brand">FARHAN's DEVFLEET<span style="font-size:0.6em;vertical-align:super;">™</span><span class="ver">v2026.05</span></div>
+  <div class="cmd" tabindex="0">
+    <span class="icon"></span>
+    <span class="prompt">SEARCH MISSIONS / AGENTS / SESSIONS / COMMITS…</span>
+    <kbd>⌘ K</kbd>
+  </div>
+  <div class="mast-right">
+    <span class="live">SIGNAL LIVE</span>
+    <span class="clock">14:32:08 UTC</span>
+    <span class="user">F.RASHID</span>
+  </div>
+</header>
+
+<section class="toolbar">
+  <div class="crumb">
+    <b>WORKSTATION</b>
+    <span class="sep">/</span>
+    <span>FLEET-01</span>
+    <span class="sep">/</span>
+    <span>MISSION CONTROL</span>
+    <span class="pill">● ALL SYSTEMS GREEN</span>
+  </div>
+  <div class="actions">
+    <button class="btn">REPORTS<kbd>R</kbd></button>
+    <button class="btn">REVIEW QUEUE<kbd>Q</kbd></button>
+    <button class="btn btn--danger">KILL ALL<kbd>⌘ ⌫</kbd></button>
+    <button class="btn btn--ghost-g">SHIP <kbd>S</kbd></button>
+    <button class="btn btn--primary">DISPATCH MISSION<kbd>⌘ N</kbd></button>
+  </div>
+</section>
+
+<section class="heading">
+  <div>
+    <div class="pre">MISSION CONTROL // SECTOR FLEET-01</div>
+    <h1>FLEET <span class="accent">RUNNING.</span><br><span class="dim">SEVEN OF TWELVE.</span></h1>
+  </div>
+  <div class="corner">
+    UPTIME · <b>14d 06h</b><br>
+    LAST INCIDENT · 11d 04h AGO<br>
+    BRANCH · <b>feature/hardening-rebrand</b><br>
+    STATUS · <span class="ok">● ALL GREEN</span>
+  </div>
+</section>
+
+<section class="kpis">
+  <div class="kpi">
+    <div class="label">RUNNING AGENTS <span class="badge">LIVE</span></div>
+    <div class="value amber">07</div>
+    <div class="meta"><span class="up">↑ 2 since 13:00</span></div>
+    <div class="spark"><svg viewBox="0 0 100 28" preserveAspectRatio="none"><polyline points="0,22 8,18 16,20 24,15 32,13 40,11 48,9 56,7 64,9 72,6 80,8 88,4 96,5 100,3" fill="none" stroke="#d4a017" stroke-width="1.2" opacity="0.7"/></svg></div>
+  </div>
+  <div class="kpi">
+    <div class="label">QUEUE DEPTH</div>
+    <div class="value">08</div>
+    <div class="meta"><span>3 ARMED · 5 WAIT</span></div>
+    <div class="spark"><svg viewBox="0 0 100 28" preserveAspectRatio="none"><polyline points="0,10 12,12 24,6 36,8 48,14 60,10 72,16 84,12 96,18 100,20" fill="none" stroke="#8a9482" stroke-width="1.2" opacity="0.5"/></svg></div>
+  </div>
+  <div class="kpi">
+    <div class="label">24H DISPATCHED</div>
+    <div class="value green">47</div>
+    <div class="meta"><span class="up">↑ 12</span> <span>vs prior 24h</span></div>
+    <div class="spark"><svg viewBox="0 0 100 28" preserveAspectRatio="none"><polyline points="0,25 10,23 20,21 30,19 40,15 50,13 60,11 70,9 80,5 90,3 100,2" fill="none" stroke="#6ea358" stroke-width="1.2" opacity="0.6"/></svg></div>
+  </div>
+  <div class="kpi">
+    <div class="label">24H SPEND</div>
+    <div class="value">$23.40</div>
+    <div class="meta"><span>$0.49 / MISSION</span></div>
+    <div class="spark"><svg viewBox="0 0 100 28" preserveAspectRatio="none"><polyline points="0,17 10,15 20,13 30,15 40,11 50,13 60,9 70,11 80,7 90,5 100,3" fill="none" stroke="#8a9482" stroke-width="1.2" opacity="0.5"/></svg></div>
+  </div>
+  <div class="kpi">
+    <div class="label">SUCCESS RATE</div>
+    <div class="value green">94<span style="color:var(--ink-4);font-size:0.55em;">%</span></div>
+    <div class="meta"><span class="up">↑ 2pp</span> <span>vs 7d avg</span></div>
+    <div class="spark"><svg viewBox="0 0 100 28" preserveAspectRatio="none"><polyline points="0,7 10,9 20,7 30,10 40,7 50,8 60,7 70,5 80,7 90,3 100,5" fill="none" stroke="#6ea358" stroke-width="1.2" opacity="0.5"/></svg></div>
+  </div>
+</section>
+
+<main class="main">
+  <section class="panel">
+    <div class="panel-head">
+      <h2>ACTIVE LANES</h2>
+      <div class="count">4 LANES · <b>7 RUNNING</b> / 12 SLOTS</div>
+    </div>
+    <div class="filters">
+      <button class="chip active">ALL <span class="n">4</span></button>
+      <button class="chip">CODER <span class="n">3</span></button>
+      <button class="chip">REVIEWER <span class="n">2</span></button>
+      <button class="chip">RESEARCHER <span class="n">1</span></button>
+      <button class="chip">ARCHITECT <span class="n">1</span></button>
+    </div>
+
+    <div class="lanes-grid">
+
+      <div class="lane rag-a">
+        <div class="lane-head"><span class="name">CODER</span><span class="ratio">3<span class="of">/4</span></span></div>
+        <div class="slots"><div class="slot active"></div><div class="slot active"></div><div class="slot active"></div><div class="slot"></div></div>
+        <div class="agent-list">
+          <div class="agent"><span class="dot a"></span><span><b class="id">A-4711</b> <span class="title">Implement auth gate on dispatch route</span></span><span class="runtime">04:12</span></div>
+          <div class="agent"><span class="dot a"></span><span><b class="id">A-4712</b> <span class="title">Wire LaneCreate / LaneUpdate Pydantic</span></span><span class="runtime">02:38</span></div>
+          <div class="agent"><span class="dot a"></span><span><b class="id">A-4715</b> <span class="title">Backfill missions.lane in db.py SCHEMA</span></span><span class="runtime">00:48</span></div>
+        </div>
+      </div>
+
+      <div class="lane rag-a">
+        <div class="lane-head"><span class="name">REVIEWER</span><span class="ratio">2<span class="of">/3</span></span></div>
+        <div class="slots"><div class="slot active"></div><div class="slot active"></div><div class="slot"></div></div>
+        <div class="agent-list">
+          <div class="agent"><span class="dot a"></span><span><b class="id">R-2204</b> <span class="title">Audit Phase 1c require_auth coverage</span></span><span class="runtime">06:51</span></div>
+          <div class="agent"><span class="dot a"></span><span><b class="id">R-2207</b> <span class="title">Verify HITL UUID fix downstream lookups</span></span><span class="runtime">01:22</span></div>
+        </div>
+      </div>
+
+      <div class="lane rag-g">
+        <div class="lane-head"><span class="name">RESEARCHER</span><span class="ratio">1<span class="of">/3</span></span></div>
+        <div class="slots"><div class="slot active"></div><div class="slot"></div><div class="slot"></div></div>
+        <div class="agent-list">
+          <div class="agent"><span class="dot g"></span><span><b class="id">S-1108</b> <span class="title">Find all SSE endpoints using EventSource</span></span><span class="runtime">00:34</span></div>
+        </div>
+      </div>
+
+      <div class="lane rag-g">
+        <div class="lane-head"><span class="name">ARCHITECT</span><span class="ratio">1<span class="of">/2</span></span></div>
+        <div class="slots"><div class="slot active"></div><div class="slot"></div></div>
+        <div class="agent-list">
+          <div class="agent"><span class="dot g"></span><span><b class="id">X-0902</b> <span class="title">Plan: 2026-Q3 cost-routing v2</span></span><span class="runtime">12:05</span></div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <section class="panel queue">
+    <div class="panel-head">
+      <h2>QUEUE</h2>
+      <div class="count">8 PENDING · <b>3 ARMED</b></div>
+    </div>
+
+    <div class="item">
+      <div class="num">01</div>
+      <div>
+        <div class="title">Smoke-test fleet events SSE with valid JWT</div>
+        <div class="meta">CODER · deps clear · 2m est</div>
+      </div>
+      <div class="status armed">ARMED</div>
+    </div>
+    <div class="item">
+      <div class="num">02</div>
+      <div>
+        <div class="title">Backport require_auth to /api/sessions/{sid}/takeover</div>
+        <div class="meta">CODER · deps clear · 4m est</div>
+      </div>
+      <div class="status armed">ARMED</div>
+    </div>
+    <div class="item">
+      <div class="num">03</div>
+      <div>
+        <div class="title">Drop legacy /sonnet alias after telemetry</div>
+        <div class="meta">CODER · 2026-06-30 gate</div>
+      </div>
+      <div class="status waiting">WAIT</div>
+    </div>
+    <div class="item">
+      <div class="num">04</div>
+      <div>
+        <div class="title">Review Phase 4d json_each perf at 100k rows</div>
+        <div class="meta">REVIEWER · waiting on A-4715</div>
+      </div>
+      <div class="status waiting">WAIT</div>
+    </div>
+    <div class="item">
+      <div class="num">05</div>
+      <div>
+        <div class="title">Open PR — hardening-rebrand → main</div>
+        <div class="meta">verification gates pending</div>
+      </div>
+      <div class="status blocked">BLOCK</div>
+    </div>
+    <div class="item">
+      <div class="num">06</div>
+      <div>
+        <div class="title">Wire Probaho typography in PromptStudio chip</div>
+        <div class="meta">CODER · deps clear · 3m est</div>
+      </div>
+      <div class="status armed">ARMED</div>
+    </div>
+
+  </section>
+</main>
+
+<section class="activity">
+  <div class="activity-head">
+    <h2>ACTIVITY · LAST 60s</h2>
+    <div class="count" style="font-size:var(--fs-meta);letter-spacing:0.16em;text-transform:uppercase;color:var(--ink-2);">streaming · 14:32:08 UTC</div>
+  </div>
+  <div class="stream">
+    <div class="line"><span class="ts">14:32:08</span><span class="kind commit">commit</span><span class="who">A-4711</span><span class="what">Farhanfix(security): wire require_auth on dispatch · sha 8c4a2f1</span></div>
+    <div class="line"><span class="ts">14:32:01</span><span class="kind dispatch">dispatch</span><span class="who">A-4715</span><span class="what">mission "backfill missions.lane" picked up from coder lane</span></div>
+    <div class="line"><span class="ts">14:31:54</span><span class="kind report">report</span><span class="who">R-2204</span><span class="what">14 routes audited · 6 unprotected · 8 gated · diff in /tmp/audit-2204</span></div>
+    <div class="line"><span class="ts">14:31:42</span><span class="kind spawn">spawn</span><span class="who">S-1108</span><span class="what">sub-mission created from X-0902 — "scan SSE endpoints"</span></div>
+    <div class="line"><span class="ts">14:31:31</span><span class="kind commit">commit</span><span class="who">A-4712</span><span class="what">Farhanfix(lanes): LaneCreate body schema · sha b6e91d8</span></div>
+    <div class="line"><span class="ts">14:31:18</span><span class="kind handoff">handoff</span><span class="who">X-0902</span><span class="what">plan complete → handing off to R-2204 for review</span></div>
+    <div class="line"><span class="ts">14:30:52</span><span class="kind retry">retry</span><span class="who">A-4714</span><span class="what">test flake on tag-filter → retry 1/3</span></div>
+    <div class="line"><span class="ts">14:30:14</span><span class="kind complete">complete</span><span class="who">A-4710</span><span class="what">mission "fix DispatchPanel default model" closed · 47s · $0.12</span></div>
+  </div>
+</section>
+
+<script>
+  // Live-tick clock so the workstation feels live even without a backend.
+  function tick() {
+    const n = new Date();
+    const t = n.toISOString().slice(11, 19);
+    document.querySelector('.mast-right .clock').textContent = t + ' UTC';
+  }
+  setInterval(tick, 1000);
+  tick();
+</script>
+
+</body>
+</html>

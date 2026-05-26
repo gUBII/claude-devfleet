@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { getDashboardStats } from '../api/client';
 import { useAuth } from '../auth';
 import ChangePassword from './ChangePassword';
+import BrandMark from './BrandMark';
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1' },
@@ -45,9 +46,8 @@ export default function Sidebar({ activePage, navigate, agentDelta = 0 }) {
   return (
     <aside className="sidebar">
       <div className="sidebar-logo">
-        <h1>Nexis365 <span className="logo-gradient">DevFleet</span><sup style={{fontSize:'0.45em',marginLeft:3,opacity:0.6,verticalAlign:'super'}}>™</sup></h1>
-        <p style={{fontSize:11,opacity:0.45,fontStyle:'italic',marginTop:3,marginBottom:2}}>v2026.05</p>
-        <p className="powered-by">Powered by Claude Code</p>
+        <BrandMark size="md" />
+        <p className="sidebar-logo__meta">v2026.05  ·  Powered by Claude Code</p>
       </div>
 
       <nav className="sidebar-nav">

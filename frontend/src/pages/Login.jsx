@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { login as loginApi } from '../api/client';
 import { useAuth } from '../auth';
+import BrandMark from '../components/BrandMark';
 
 const MEMBERS = [
   { id: 'farhan', name: 'Farhan', handle: 'gUBII',          initial: 'F', email: 'farhan@devfleet.local', photo: null },
@@ -38,10 +39,11 @@ export default function Login({ navigate }) {
   return (
     <div className="auth-page">
       <div className="auth-gate-card">
-        <img src="/nexis365_logo.png" className="auth-nexis-logo" alt="Nexis365" />
+        <div className="auth-nexis-logo" style={{ display: 'flex', justifyContent: 'center', marginBottom: 4 }}>
+          <BrandMark size="lg" />
+        </div>
         <div className="auth-gate-divider" />
-        <h1 className="auth-gate-title">DevFleet</h1>
-        <p className="auth-gate-sub">Control Center — select your profile</p>
+        <p className="auth-gate-sub">Control Center  ·  Select your profile</p>
 
         <div className="auth-member-grid">
           {MEMBERS.map(m => (
