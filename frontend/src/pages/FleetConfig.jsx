@@ -3,6 +3,7 @@ import {
   getSystemStatus, setGlobalCeiling, listLanes, updateLane,
   createLane, deleteLane,
 } from '../api/client';
+import { Knob, Switch, Meter, LED } from '../components/hw';
 
 const MODELS = [
   'claude-sonnet-4-6',
@@ -75,14 +76,15 @@ function LaneEditor({ lane, onSave, onClose, onDeleted, navigate }) {
         </div>
 
         <div className="lane-editor-body">
-          <div className="field-row">
+          <div className="field-row" style={{ alignItems: 'center' }}>
             <label>Max Concurrent Agents</label>
-            <input
-              type="number"
+            <Knob
+              value={form.max_agents}
               min={0}
               max={10}
-              value={form.max_agents}
-              onChange={e => setForm(f => ({ ...f, max_agents: parseInt(e.target.value) || 0 }))}
+              step={1}
+              size="md"
+              onChange={(v) => setForm(f => ({ ...f, max_agents: v }))}
             />
           </div>
 
@@ -98,15 +100,14 @@ function LaneEditor({ lane, onSave, onClose, onDeleted, navigate }) {
             </select>
           </div>
 
-          <div className="field-row">
-            <label>
-              <input
-                type="checkbox"
-                checked={form.enabled}
-                onChange={e => setForm(f => ({ ...f, enabled: e.target.checked }))}
-              />
-              {' '}Lane enabled
-            </label>
+          <div className="field-row" style={{ alignItems: 'center' }}>
+            <label>Lane enabled</label>
+            <Switch
+              checked={form.enabled}
+              onChange={(v) => setForm(f => ({ ...f, enabled: v }))}
+              tone="g"
+              ariaLabel="Lane enabled"
+            />
           </div>
 
           <div className="lane-editor-prompt-link">
@@ -227,14 +228,15 @@ function NewLaneModal({ onCreated, onClose, navigate }) {
             />
           </div>
 
-          <div className="field-row">
+          <div className="field-row" style={{ alignItems: 'center' }}>
             <label>Max Concurrent Agents</label>
-            <input
-              type="number"
+            <Knob
+              value={form.max_agents}
               min={1}
               max={10}
-              value={form.max_agents}
-              onChange={e => setForm(f => ({ ...f, max_agents: parseInt(e.target.value) || 1 }))}
+              step={1}
+              size="md"
+              onChange={(v) => setForm(f => ({ ...f, max_agents: v }))}
             />
           </div>
 
@@ -383,11 +385,21 @@ export default function FleetConfig({ navigate }) {
                 <span className="slot-max">{lane.max_agents}</span>
               </div>
             </div>
-            {/* Prompt preview removed — Prompt Studio is the authoring surface.
-                Card now stays focused on capacity + status. */}
+            {/* Capacity meter — uses RAG auto-tone via fill ratio */}
+            {lane.enabled && lane.max_agents > 0 && (
+              <div style={{ padding: '0 14px 6px' }}>
+                <Meter
+                  value={lane.running ?? 0}
+                  max={lane.max_agents}
+                  segments={Math.min(10, lane.max_agents)}
+                  showCount={false}
+                  size="sm"
+                />
+              </div>
+            )}
             <div className="lane-card-footer">
-              <span className={`lane-status-dot ${lane.enabled ? 'active' : 'inactive'}`} />
-              <span>{lane.enabled ? 'active' : 'disabled'}</span>
+              <LED tone={lane.enabled ? (lane.running > 0 ? 'a' : 'g') : 'off'} pulse={lane.running > 0} size="sm" />
+              <span>{lane.enabled ? (lane.running > 0 ? 'running' : 'idle') : 'disabled'}</span>
               <span className="edit-hint">✎ edit</span>
             </div>
           </div>
