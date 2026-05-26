@@ -20,7 +20,7 @@ from models import (ProjectCreate, ProjectUpdate, MissionCreate, MissionUpdate,
                     McpServerCreate, CeilingUpdate,
                     HitlAskRequest, HitlReply, ProjectChatRequest,
                     GitHubTokenSet, UserPermissionGrant, CHAT_PERMISSIONS,
-                    ChangePasswordRequest)
+                    ChangePasswordRequest, LaneCreate, LaneUpdate)
 import health_checker
 import mission_watcher
 import scheduler
@@ -1616,23 +1616,26 @@ async def run_lane_critique_batch():
 
 
 @app.post("/api/lanes")
-async def create_lane_endpoint(body: dict, request: Request):
+async def create_lane_endpoint(body: LaneCreate, request: Request):
     """Create a user-defined lane. Built-in lane names are rejected (use PUT
     to edit those). Any authenticated user can add a lane — consistent with
     Prompt Studio, which lets non-admins edit lane prompts without a role
-    check. Built-in protection lives at the lanes layer, not here."""
+    check. Built-in protection lives at the lanes layer, not here.
+
+    Bad input (e.g. max_agents as a string) gets a 422 from Pydantic before
+    we reach the handler — no more silent 500s from int() coercion."""
     user = getattr(request.state, "user", None)
     if not user:
         raise HTTPException(401, "Authentication required")
     from lanes import create_lane, LaneValidationError
     try:
         return await create_lane(
-            name=body.get("name", ""),
-            icon=body.get("icon", ""),
-            max_agents=int(body.get("max_agents", 1)),
-            default_model=body.get("default_model", "claude-sonnet-4-6"),
-            tool_preset=body.get("tool_preset", "implement"),
-            color=body.get("color", "#888888"),
+            name=body.name,
+            icon=body.icon,
+            max_agents=body.max_agents,
+            default_model=body.default_model,
+            tool_preset=body.tool_preset,
+            color=body.color,
         )
     except LaneValidationError as exc:
         raise HTTPException(400, str(exc))
@@ -1666,13 +1669,17 @@ async def get_lane(name: str):
 
 
 @app.put("/api/lanes/{name}")
-async def update_lane_endpoint(name: str, body: dict):
+async def update_lane_endpoint(name: str, body: LaneUpdate, request: Request):
+    _lane_user = getattr(request.state, "user", None)
+    if not _lane_user:
+        raise HTTPException(401, "Authentication required")
     from lanes import update_lane, get_one_lane
     existing = await get_one_lane(name)
     if not existing:
         raise HTTPException(404, f"Lane '{name}' not found")
-    allowed = {"max_agents", "default_model", "tool_preset", "append_prompt", "color", "icon", "enabled"}
-    patch = {k: v for k, v in body.items() if k in allowed}
+    # Only forward fields the client actually set — preserves PATCH semantics
+    # over the partial-Optional LaneUpdate model.
+    patch = body.model_dump(exclude_unset=True)
     updated = await update_lane(name, patch)
     return updated
 
