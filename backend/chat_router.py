@@ -41,7 +41,7 @@ _SLASH_RE = re.compile(r"^\s*/(haiku|gitsheba|sonnet|opus)\b", re.IGNORECASE)
 _SLASH_TO_PERSONA: dict[str, ChatPersona] = {
     "haiku": "researcher",
     "gitsheba": "git_operator",
-    "sonnet": "git_operator",  # legacy alias
+    "sonnet": "git_operator",  # legacy alias — TODO(2026-06-30): remove after telemetry confirms zero usage
     "opus": "architect",
 }
 
