@@ -1,75 +1,6 @@
 /* Farhan's DevFleet™ — Workstation Theme */
-:root {
-  /* Brand mark — single source of truth */
-  --brand-mark: #d4a017;          /* amber bar-glyph + wordmark color */
-  --brand-mark-hot: #e8b820;      /* hover/active variant */
-
-  /* RAG palette — used ONLY for state (mission/agent/service/incident) */
-  --rag-g: #6ea358;
-  --rag-a: #d4a017;
-  --rag-r: #d36359;
-  --rag-g-soft: rgba(110, 163, 88, 0.12);
-  --rag-a-soft: rgba(212, 160, 23, 0.12);
-  --rag-r-soft: rgba(211, 99, 89, 0.12);
-
-  --bg-base: #09090b;
-  --bg-sidebar: #0f0f13;
-  --bg-surface: #18181b;
-  --bg-elevated: #1e1e23;
-  --bg-hover: #27272a;
-  --bg-input: #111114;
-
-  /* Aliases — kept distinct in case we want to tune later. */
-  --surface-card: var(--bg-elevated);
-  --surface-hover: var(--bg-hover);
-
-  --text-primary: #fafafa;
-  --text-secondary: #a1a1aa;
-  --text-muted: #71717a;
-  --text-dim: #52525b;
-
-  --border: rgba(255, 255, 255, 0.06);
-  --border-subtle: rgba(255, 255, 255, 0.03);
-  --border-strong: rgba(255, 255, 255, 0.12);
-
-  --accent: #da7756;
-  --accent-hover: #c96a4b;
-  --accent-soft: rgba(218, 119, 86, 0.08);
-  --accent-glow: rgba(218, 119, 86, 0.2);
-  --accent-text: #e8956e;
-
-  --success: #22c55e;
-  --success-soft: rgba(34, 197, 94, 0.1);
-  --warning: #eab308;
-  --warning-soft: rgba(234, 179, 8, 0.1);
-  --danger: #ef4444;
-  --danger-soft: rgba(239, 68, 68, 0.1);
-  --info: #3b82f6;
-  --info-soft: rgba(59, 130, 246, 0.1);
-
-  --status-draft: #71717a;
-  --status-queued: #3b82f6;
-  --status-running: #eab308;
-  --status-completed: #22c55e;
-  --status-failed: #ef4444;
-  --status-cancelled: #a1a1aa;
-
-  --terminal-bg: #0a0a0a;
-  --terminal-text: #22c55e;
-  --terminal-border: rgba(34, 197, 94, 0.15);
-
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
-  --radius-full: 9999px;
-
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
-
-  --sidebar-width: 240px;
-  --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
-}
+/* All design tokens live in ./design/tokens.css (single source of truth). */
+@import './design/tokens.css';
 
 * {
   margin: 0;
@@ -162,15 +93,19 @@ body {
 }
 
 .sidebar-nav {
-  padding: 12px 8px;
+  padding: 14px 10px;
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
+/* Raised idle, recessed when active — like a control-panel button strip */
 .nav-item {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
+  padding: 9px 12px 9px 14px;
   border-radius: 0;
   cursor: pointer;
   color: var(--text-secondary);
@@ -178,24 +113,54 @@ body {
   font-size: 12.5px;
   font-weight: 500;
   letter-spacing: 0.04em;
-  transition: background 0.12s, color 0.12s;
-  border: none;
+  background: var(--grad-raised);
+  border: 1px solid var(--edge-1);
+  border-top-color: var(--edge-2);
+  border-bottom-color: rgba(0, 0, 0, 0.4);
   border-left: 2px solid transparent;
-  background: none;
+  box-shadow:
+    0 1px 0 var(--bevel-top) inset,
+    0 1px 2px rgba(0, 0, 0, 0.35);
+  transition: transform var(--t-fast) var(--ease-press),
+              box-shadow var(--t-fast) var(--ease-press),
+              background var(--t-base) ease,
+              color var(--t-base) ease,
+              border-left-color var(--t-base) ease;
   width: 100%;
   text-align: left;
+  position: relative;
 }
 
 .nav-item:hover {
-  background: var(--bg-hover);
+  background: var(--grad-raised-hover);
   color: var(--text-primary);
-  border-left-color: var(--border-strong);
+  border-left-color: var(--edge-3);
+}
+
+.nav-item:active {
+  transform: translateY(1px);
+  box-shadow: var(--shadow-pressed);
+  background: var(--grad-pressed);
 }
 
 .nav-item.active {
-  background: var(--rag-a-soft);
+  /* Permanently sunk — like a physical button held down. */
+  background: var(--grad-pressed);
   color: var(--brand-mark);
   border-left-color: var(--brand-mark);
+  box-shadow: var(--shadow-recessed);
+  transform: translateY(1px);
+}
+
+.nav-item.active::before {
+  /* Subtle amber LED next to the recessed item */
+  content: '';
+  position: absolute;
+  left: -1px; top: 50%;
+  width: 3px; height: 18px;
+  margin-top: -9px;
+  background: var(--brand-mark);
+  box-shadow: var(--shadow-glow-amber);
 }
 
 .nav-icon {
@@ -2918,50 +2883,143 @@ body {
   justify-content: flex-end;
 }
 
-/* ── Distinct buttons ── */
+/* ── 3D Hardware Buttons ──────────────────────────────────────────────
+   Raised at rest. Lift slightly on hover. Push DOWN on :active. Active
+   variant (.is-active) is permanently recessed — for nav/tab selection. */
 .ws-btn {
-  display: inline-flex; align-items: center; gap: 8px;
+  display: inline-flex; align-items: center; gap: var(--sp-2);
   padding: 9px clamp(11px, 1.2vw, 18px);
   font-family: var(--font-mono);
-  font-size: clamp(10px, 0.5vw + 7.5px, 11.5px);
+  font-size: var(--fs-micro);
   font-weight: 600;
-  letter-spacing: 0.18em;
+  letter-spacing: var(--tracking-widest);
   text-transform: uppercase;
-  background: transparent;
   color: var(--text-primary);
-  border: 1px solid var(--border-strong);
+  background: var(--grad-raised);
+  border: 1px solid var(--edge-2);
+  border-top-color: var(--edge-3);     /* extra highlight on top edge */
+  border-bottom-color: rgba(0, 0, 0, 0.55);
+  box-shadow: var(--shadow-raised);
   cursor: pointer;
-  transition: all 0.12s ease;
+  transition: transform var(--t-fast) var(--ease-press),
+              box-shadow var(--t-fast) var(--ease-press),
+              background var(--t-base) ease,
+              border-color var(--t-base) ease;
   white-space: nowrap;
   border-radius: 0;
+  position: relative;
+  user-select: none;
 }
 .ws-btn:hover {
-  border-color: var(--text-primary);
-  background: var(--bg-hover);
+  background: var(--grad-raised-hover);
+  border-color: var(--edge-3);
+  transform: translateY(-1px);
+}
+.ws-btn:active,
+.ws-btn.is-pressed {
+  transform: translateY(2px);
+  box-shadow: var(--shadow-pressed);
+  background: var(--grad-pressed);
+  border-top-color: rgba(0, 0, 0, 0.45);
+  border-bottom-color: var(--edge-1);
+}
+.ws-btn.is-active {
+  /* Permanently pressed-in (selected tab, active nav). */
+  transform: translateY(1px);
+  box-shadow: var(--shadow-recessed);
+  background: var(--grad-pressed);
+  border-color: var(--edge-1);
+  color: var(--brand-mark);
 }
 .ws-btn:focus-visible {
   outline: 2px solid var(--brand-mark);
   outline-offset: 2px;
 }
+.ws-btn:disabled,
+.ws-btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: var(--shadow-raised);
+}
+
+/* Primary — amber filled, glow halo on hover */
 .ws-btn--primary {
-  background: var(--brand-mark);
-  color: #1a1408;
-  border-color: var(--brand-mark);
+  background: var(--grad-primary);
+  color: var(--brand-ink);
+  border-color: var(--brand-mark-hot);
+  border-top-color: #f4ca34;
+  border-bottom-color: #b88813;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.15);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.25) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.25) inset,
+    0 2px 4px rgba(0, 0, 0, 0.4),
+    0 0 0 rgba(212, 160, 23, 0);
 }
 .ws-btn--primary:hover {
-  background: var(--brand-mark-hot);
-  border-color: var(--brand-mark-hot);
-  box-shadow: 0 0 14px rgba(212, 160, 23, 0.4);
-  transform: translateY(-1px);
+  background: var(--grad-primary-hover);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.3) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.25) inset,
+    0 3px 6px rgba(0, 0, 0, 0.45),
+    var(--shadow-glow-amber);
 }
-.ws-btn--danger { color: var(--rag-r); border-color: var(--rag-r); }
+.ws-btn--primary:active {
+  background: linear-gradient(180deg, #b88813 0%, #d4a017 100%);
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, 0.55) inset,
+    0 -1px 0 rgba(255, 255, 255, 0.05) inset;
+}
+
+/* Danger — red ghost, fills red on hover */
+.ws-btn--danger {
+  color: var(--rag-r);
+  border-color: var(--rag-r-edge);
+  background: linear-gradient(180deg, #2a1d1c 0%, #1c1413 100%);
+}
 .ws-btn--danger:hover {
-  background: var(--rag-r);
-  color: var(--bg-base);
-  box-shadow: 0 0 12px rgba(211, 99, 89, 0.4);
+  background: linear-gradient(180deg, #d36359 0%, #b04a40 100%);
+  color: #fff;
+  border-color: var(--rag-r);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.15) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.3) inset,
+    0 3px 6px rgba(0, 0, 0, 0.45),
+    var(--shadow-glow-r);
 }
-.ws-btn--ghost-g { color: var(--rag-g); border-color: rgba(110, 163, 88, 0.45); }
-.ws-btn--ghost-g:hover { background: var(--rag-g-soft); border-color: var(--rag-g); }
+
+/* Ghost-G — green ghost (ship/complete) */
+.ws-btn--ghost-g {
+  color: var(--rag-g);
+  border-color: var(--rag-g-edge);
+  background: linear-gradient(180deg, #1c2419 0%, #131a11 100%);
+}
+.ws-btn--ghost-g:hover {
+  background: linear-gradient(180deg, #6ea358 0%, #557d44 100%);
+  color: #fff;
+  border-color: var(--rag-g);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.15) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.3) inset,
+    0 3px 6px rgba(0, 0, 0, 0.45),
+    var(--shadow-glow-g);
+}
+
+/* Compact size variant */
+.ws-btn--sm {
+  padding: 6px 10px;
+  font-size: 10px;
+  letter-spacing: var(--tracking-wider);
+}
+
+/* Icon-only square button */
+.ws-btn--icon {
+  padding: 8px;
+  width: 34px;
+  height: 34px;
+  justify-content: center;
+}
 
 /* ── Heading ── */
 .ws-heading {
@@ -2983,12 +3041,19 @@ body {
   margin: 0;
   font-family: 'Space Mono', var(--font-mono);
   font-weight: 700;
-  font-size: clamp(28px, 5vw + 6px, 76px);
-  line-height: 0.95;
-  letter-spacing: -0.04em;
+  font-size: clamp(26px, 3.6vw + 4px, 60px);
+  line-height: 0.98;
+  letter-spacing: -0.025em;
   color: var(--text-primary);
+  max-width: 100%;
+  overflow-wrap: break-word;
 }
-.ws-h1-dim    { color: var(--text-dim); }
+.ws-h1-dim {
+  color: var(--text-dim);
+  font-size: 0.78em;
+  display: inline-block;
+  margin-top: 4px;
+}
 .ws-h1-accent--g { color: var(--rag-g); }
 .ws-h1-accent--a { color: var(--rag-a); }
 .ws-h1-accent--r { color: var(--rag-r); }
@@ -3330,3 +3395,275 @@ body {
 
 /* Override the stale `style={{color}}` inline still on .dash-stat-val */
 .ws .dash-stat-card[style*="cursor"] .dash-stat-val { color: inherit; }
+
+/* ════════════════════════ HARDWARE UI KIT ═════════════════════════════
+   .ws-switch / .ws-knob / .ws-segment / .ws-led / .ws-meter
+   All use depth tokens from design/tokens.css — never hardcode shadows.
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ── Switch ─────────────────────────────────────────────────────────── */
+.ws-switch-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.ws-switch-wrap.is-disabled { opacity: 0.5; }
+.ws-switch-label { white-space: nowrap; }
+
+.ws-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 56px;
+  height: 26px;
+  padding: 2px;
+  background: var(--grad-pressed);
+  border: 1px solid var(--edge-2);
+  border-top-color: rgba(0, 0, 0, 0.6);
+  border-bottom-color: var(--edge-1);
+  box-shadow: var(--shadow-pressed);
+  cursor: pointer;
+  border-radius: 0;
+  font-family: var(--font-mono);
+  user-select: none;
+  transition: border-color var(--t-base) ease, box-shadow var(--t-base) ease;
+}
+.ws-switch:focus-visible {
+  outline: 2px solid var(--brand-mark);
+  outline-offset: 2px;
+}
+.ws-switch:disabled { cursor: not-allowed; opacity: 0.5; }
+
+.ws-switch__track {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 7px;
+  pointer-events: none;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  color: var(--ink-3);
+}
+.ws-switch__mark--off { font-weight: 700; }
+.ws-switch__mark--on  { font-weight: 700; }
+
+.ws-switch__knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 22px;
+  height: 20px;
+  background: var(--grad-raised);
+  border: 1px solid var(--edge-3);
+  border-top-color: rgba(255, 255, 255, 0.18);
+  border-bottom-color: rgba(0, 0, 0, 0.7);
+  box-shadow: var(--shadow-raised);
+  transition: left var(--t-base) var(--ease-out),
+              background var(--t-base) ease,
+              border-color var(--t-base) ease;
+}
+
+.ws-switch.is-on .ws-switch__knob { left: 30px; }
+.ws-switch.is-on.ws-switch--amber .ws-switch__knob {
+  background: var(--grad-primary);
+  border-color: var(--brand-mark-hot);
+  box-shadow: var(--shadow-raised), var(--shadow-glow-amber);
+}
+.ws-switch.is-on.ws-switch--g .ws-switch__knob {
+  background: linear-gradient(180deg, #7eb567 0%, #4f7340 100%);
+  border-color: var(--rag-g);
+  box-shadow: var(--shadow-raised), var(--shadow-glow-g);
+}
+.ws-switch.is-on.ws-switch--r .ws-switch__knob {
+  background: linear-gradient(180deg, #e87770 0%, #a44a40 100%);
+  border-color: var(--rag-r);
+  box-shadow: var(--shadow-raised), var(--shadow-glow-r);
+}
+.ws-switch.is-on .ws-switch__mark--on  { color: var(--text-primary); }
+.ws-switch.is-off .ws-switch__mark--off { color: var(--text-secondary); }
+
+/* ── Knob ───────────────────────────────────────────────────────────── */
+.ws-knob-wrap {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+}
+.ws-knob-wrap.is-disabled { opacity: 0.5; }
+.ws-knob-label {
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.ws-knob {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: ns-resize;
+  user-select: none;
+  touch-action: none;
+}
+.ws-knob:focus-visible {
+  outline: 2px solid var(--brand-mark);
+  outline-offset: 4px;
+  border-radius: 50%;
+}
+.ws-knob:active { cursor: grabbing; }
+.ws-knob__value {
+  position: absolute;
+  color: var(--brand-mark);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  text-shadow: 0 0 6px rgba(212, 160, 23, 0.4);
+  pointer-events: none;
+}
+.ws-knob__suffix {
+  color: var(--text-muted);
+  font-size: 0.65em;
+  font-weight: 500;
+  margin-left: 1px;
+}
+
+/* ── Segment ────────────────────────────────────────────────────────── */
+.ws-segment {
+  display: inline-flex;
+  background: var(--surf-0);
+  border: 1px solid var(--edge-2);
+  border-top-color: rgba(0, 0, 0, 0.5);
+  border-bottom-color: var(--edge-1);
+  padding: 2px;
+  box-shadow: var(--shadow-pressed);
+}
+.ws-segment.is-disabled { opacity: 0.5; }
+.ws-segment__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 6px 12px;
+  background: var(--grad-raised);
+  border: 1px solid var(--edge-1);
+  border-top-color: var(--edge-2);
+  border-bottom-color: rgba(0, 0, 0, 0.4);
+  box-shadow:
+    0 1px 0 var(--bevel-top) inset,
+    0 1px 2px rgba(0, 0, 0, 0.35);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: var(--tracking-wider);
+  text-transform: uppercase;
+  cursor: pointer;
+  border-radius: 0;
+  transition: transform var(--t-fast) var(--ease-press),
+              box-shadow var(--t-fast) var(--ease-press),
+              background var(--t-base) ease,
+              color var(--t-base) ease;
+  white-space: nowrap;
+}
+.ws-segment__btn + .ws-segment__btn { margin-left: 2px; }
+.ws-segment__btn:hover { background: var(--grad-raised-hover); color: var(--text-primary); }
+.ws-segment__btn:active { transform: translateY(1px); box-shadow: var(--shadow-pressed); }
+.ws-segment__btn.is-active {
+  background: var(--grad-pressed);
+  color: var(--brand-mark);
+  box-shadow: var(--shadow-recessed);
+  transform: translateY(1px);
+  border-color: var(--edge-1);
+}
+.ws-segment__btn.is-active.ws-segment__btn--g { color: var(--rag-g); }
+.ws-segment__btn.is-active.ws-segment__btn--r { color: var(--rag-r); }
+.ws-segment--sm .ws-segment__btn { padding: 4px 9px; font-size: 10px; }
+
+/* ── LED ────────────────────────────────────────────────────────────── */
+.ws-led-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+}
+.ws-led {
+  display: inline-block;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  background: var(--ink-3);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.03) inset,
+    0 1px 1px rgba(0, 0, 0, 0.5);
+  transition: background var(--t-base) ease, box-shadow var(--t-base) ease;
+}
+.ws-led--off { background: var(--ink-3); }
+.ws-led--g   { background: var(--rag-g); box-shadow: 0 0 0 1px rgba(255,255,255,0.08) inset, 0 0 6px rgba(110,163,88,0.65); }
+.ws-led--a   { background: var(--rag-a); box-shadow: 0 0 0 1px rgba(255,255,255,0.08) inset, 0 0 6px rgba(212,160,23,0.7); }
+.ws-led--r   { background: var(--rag-r); box-shadow: 0 0 0 1px rgba(255,255,255,0.08) inset, 0 0 6px rgba(211,99,89,0.7); }
+
+.ws-led.is-pulsing { animation: ws-led-pulse 1.4s ease-in-out infinite; }
+@keyframes ws-led-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.55; transform: scale(0.92); }
+}
+
+.ws-led-label {
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+/* ── Meter ──────────────────────────────────────────────────────────── */
+.ws-meter-wrap {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: var(--font-mono);
+}
+.ws-meter-label {
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.ws-meter-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.ws-meter {
+  display: inline-flex;
+  background: var(--surf-0);
+  border: 1px solid var(--edge-2);
+  border-top-color: rgba(0, 0, 0, 0.55);
+  border-bottom-color: var(--edge-1);
+  padding: 2px;
+  box-shadow: var(--shadow-pressed);
+}
+.ws-meter__seg {
+  flex: 1;
+  min-width: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(0, 0, 0, 0.4);
+  transition: background var(--t-base) ease, box-shadow var(--t-base) ease;
+}
+.ws-meter__seg--on    { background: var(--rag-g); box-shadow: 0 0 4px rgba(110, 163, 88, 0.55); }
+.ws-meter__seg--g     { background: var(--rag-g); box-shadow: 0 0 4px rgba(110, 163, 88, 0.55); }
+.ws-meter__seg--a     { background: var(--rag-a); box-shadow: 0 0 5px rgba(212, 160, 23, 0.6); }
+.ws-meter__seg--r     { background: var(--rag-r); box-shadow: 0 0 5px rgba(211, 99, 89, 0.6); }
+.ws-meter__seg--amber { background: var(--rag-a); box-shadow: 0 0 5px rgba(212, 160, 23, 0.6); }
+.ws-meter-count {
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-wide);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.ws-meter-count b { color: var(--brand-mark); font-weight: 700; margin-right: 1px; }
