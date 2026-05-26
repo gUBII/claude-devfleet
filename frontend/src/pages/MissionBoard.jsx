@@ -92,19 +92,48 @@ export default function MissionBoard({ navigate }) {
     }
   };
 
+  const runningCount = missions.filter(m => m.status === 'running').length;
+  const failedCount  = missions.filter(m => m.status === 'failed').length;
+  const boardRag = failedCount > 0 ? 'r' : runningCount > 0 ? 'a' : 'g';
+  const boardRagLabel = failedCount > 0
+    ? `${failedCount} FAILED · NEEDS ATTENTION`
+    : runningCount > 0 ? `${runningCount} RUNNING`
+                       : 'ALL CLEAR';
+
   return (
-    <div>
-      <div className="page-header">
-        <div>
-          <h2>Missions</h2>
-          <p>{missions.length} total</p>
+    <div className="ws">
+      {/* Workstation toolbar */}
+      <div className="ws-toolbar">
+        <div className="ws-crumb">
+          <b>WORKSTATION</b>
+          <span className="ws-sep">/</span>
+          <span>MISSION BOARD</span>
+          <span className={`ws-pill ws-pill--${boardRag}`}>● {boardRagLabel}</span>
         </div>
-        <div className="flex gap-8">
-          <select className="form-select" value={filterProject} onChange={e => setFilterProject(e.target.value)} style={{ minWidth: 140 }}>
-            <option value="">All Projects</option>
+        <div className="ws-actions">
+          <select
+            className="ws-select"
+            value={filterProject}
+            onChange={e => setFilterProject(e.target.value)}
+          >
+            <option value="">ALL PROJECTS</option>
             {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
-          <button className="btn btn-primary" onClick={() => setShowModal(true)}>New Mission</button>
+          <button className="ws-btn" onClick={() => navigate('dashboard')}>BACK TO DASHBOARD</button>
+          <button className="ws-btn ws-btn--primary" onClick={() => setShowModal(true)}>NEW MISSION</button>
+        </div>
+      </div>
+
+      {/* Compact heading — keeps focus on tabs + cards below */}
+      <div className="ws-heading ws-heading--compact">
+        <div>
+          <div className="ws-pre">MISSION BOARD · {missions.length} TOTAL · {runningCount} LIVE</div>
+          <h1 className="ws-h1">
+            MISSIONS{' '}
+            <span className={`ws-h1-accent ws-h1-accent--${boardRag}`}>
+              {boardRag === 'g' ? 'CLEAR.' : boardRag === 'r' ? 'ATTENTION.' : 'IN FLIGHT.'}
+            </span>
+          </h1>
         </div>
       </div>
 
@@ -188,9 +217,9 @@ export default function MissionBoard({ navigate }) {
                 <div className="form-group" style={{ flex: 1 }}>
                   <label className="form-label">Model</label>
                   <select className="form-select" value={form.model} onChange={e => setForm({ ...form, model: e.target.value })}>
-                    <option value="claude-opus-4-7">Opus 4.7</option>
-                    <option value="claude-sonnet-4-6">Sonnet 4.6</option>
-                    <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
+                    <option value="claude-opus-4-7">Arun  (deep · ~$5–15/mission)</option>
+                    <option value="claude-sonnet-4-6">Probaho  (fast · ~$1–5/mission)</option>
+                    <option value="claude-haiku-4-5-20251001">Kiran  (lightweight · ~$0.10–1/mission)</option>
                   </select>
                 </div>
                 <div className="form-group" style={{ flex: 1 }}>

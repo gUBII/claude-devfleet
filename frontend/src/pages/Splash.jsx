@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react';
+import BrandMark from '../components/BrandMark';
 
 export default function Splash({ navigate }) {
   useEffect(() => {
@@ -10,8 +11,10 @@ export default function Splash({ navigate }) {
     <div className="splash-page">
       <div className="splash-inner">
         <div className="splash-spinner-ring" />
-        <img src="/nexis365_logo.png" className="splash-logo" alt="Nexis365" />
-        <p className="splash-label">Initializing DevFleet…</p>
+        <div style={{ margin: '12px 0 6px' }}>
+          <BrandMark size="lg" />
+        </div>
+        <p className="splash-label">INITIALIZING WORKSTATION…</p>
         <a
           className="splash-portfolio"
           href="https://4han.life"
