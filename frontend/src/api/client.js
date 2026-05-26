@@ -10,10 +10,18 @@ async function request(path, options = {}) {
     },
     ...options,
   });
+  // 401 on the login endpoints is "wrong credentials" — surface the server's
+  // actual detail. Only treat 401 as a session expiry when an existing token
+  // is being used elsewhere.
   if (res.status === 401) {
-    localStorage.removeItem('devfleet_token');
-    window.dispatchEvent(new CustomEvent('devfleet:logout'));
-    throw new Error('Session expired — please log in again');
+    const isAuthEndpoint = path.startsWith('/auth/login') || path.startsWith('/auth/register');
+    if (!isAuthEndpoint && token) {
+      localStorage.removeItem('devfleet_token');
+      window.dispatchEvent(new CustomEvent('devfleet:logout'));
+      throw new Error('Session expired — please log in again');
+    }
+    const err = await res.json().catch(() => ({ detail: 'Unauthorized' }));
+    throw new Error(err.detail || 'Unauthorized');
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));

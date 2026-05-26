@@ -3762,21 +3762,22 @@ body {
     0 0 38px rgba(212, 160, 23, 0.15);
 }
 
-/* Typing — every keystroke remounts the element (pulseKey) which restarts this
-   one-shot animation, producing a punchy flicker pulse per stroke. Independent
-   of password correctness — pure decoration, leaks nothing. */
+/* Strike — one-shot punch per keystroke, layered on top of the hum via a
+   secondary filter animation so the base CRT flicker isn't interrupted. */
 @keyframes brand-mark-strike {
-  0%   { opacity: 0.55; filter: brightness(0.7); }
-  18%  { opacity: 1;    filter: brightness(1.35); }
-  46%  { opacity: 0.82; filter: brightness(0.9); }
-  100% { opacity: 1;    filter: brightness(1); }
+  0%   { filter: brightness(0.85); }
+  18%  { filter: brightness(1.45); }
+  46%  { filter: brightness(0.95); }
+  100% { filter: brightness(1); }
 }
-.brand-mark--ascii.is-typing {
-  animation: brand-mark-strike 420ms ease-out;
+.brand-mark--ascii.is-pulse {
+  /* Compose strike onto the running hum animation rather than replacing it. */
+  animation:
+    brand-mark-flicker 6s ease-in-out infinite,
+    brand-mark-strike 420ms ease-out;
 }
 
-/* When the brand mark dims below ~40% intensity (gap-in-typing), kill the
-   subtle hum so it looks definitively "switched off". */
+/* Definitively "off" — submission failed or rhythm broken below threshold. */
 .brand-mark--ascii[style*="--brand-intensity: 0.35"],
 .brand-mark--ascii[style*="--brand-intensity:0.35"] {
   animation: none;

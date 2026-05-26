@@ -42,24 +42,33 @@ export default function Login({ navigate }) {
   // After a brief pause in typing, dim the brand mark — "stop typing → light
   // fades" feel. Tied to RHYTHM, not correctness. No leak.
   useEffect(() => {
+    if (idleTimer.current) {
+      clearTimeout(idleTimer.current);
+      idleTimer.current = null;
+    }
     if (!emailValid || password.length === 0) return;
-    if (idleTimer.current) clearTimeout(idleTimer.current);
     idleTimer.current = setTimeout(() => {
       setIntensity((cur) => Math.max(0.35, cur * 0.55));
     }, 900);
-    return () => clearTimeout(idleTimer.current);
+    return () => {
+      if (idleTimer.current) clearTimeout(idleTimer.current);
+      idleTimer.current = null;
+    };
   }, [password, emailValid]);
 
   const handlePasswordChange = (e) => {
     const next = e.target.value;
     const prev = password;
     setPassword(next);
-    if (emailValid) {
-      setPulseKey((k) => k + 1);              // trigger flicker pulse
-      if (next.length < prev.length) {
-        // backspace dims briefly
-        setIntensity((cur) => Math.max(0.4, cur * 0.7));
-      }
+    if (!emailValid) return;
+    // Skip the per-keystroke effects when the field is becoming empty — the
+    // length-ramp effect immediately restores intensity to 1, and a strike
+    // pulse on an empty field looks like a glitch.
+    if (next.length === 0) return;
+    setPulseKey((k) => k + 1);                // trigger flicker pulse
+    if (next.length < prev.length) {
+      // backspace dims briefly (only when characters remain)
+      setIntensity((cur) => Math.max(0.4, cur * 0.7));
     }
   };
 
