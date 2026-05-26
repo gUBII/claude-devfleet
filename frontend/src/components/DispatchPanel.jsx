@@ -304,7 +304,7 @@ const styleTag = typeof document !== 'undefined' && (() => {
 })();
 
 export default function DispatchPanel({ mission, onDispatch, onCancel }) {
-  const [model, setModel] = useState(mission.model || 'claude-opus-4-6');
+  const [model, setModel] = useState(mission.model || 'claude-sonnet-4-6');
   const [maxTurns, setMaxTurns] = useState(mission.max_turns || '');
   const [maxBudget, setMaxBudget] = useState(mission.max_budget_usd || '');
   const [toolPreset, setToolPreset] = useState(mission.mission_type || 'implement');
