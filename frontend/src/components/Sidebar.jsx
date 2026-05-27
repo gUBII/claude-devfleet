@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { getDashboardStats } from '../api/client';
+import { useFleetEvents } from '../hooks/useFleetEvents';
 import { useAuth } from '../auth';
 import ChangePassword from './ChangePassword';
 import BrandMark from './BrandMark';
@@ -21,17 +22,34 @@ export default function Sidebar({ activePage, navigate, agentDelta = 0 }) {
   const [showChangePw, setShowChangePw] = useState(false);
   const prevDelta = useRef(0);
 
-  useEffect(() => {
-    const poll = async () => {
-      try {
-        const stats = await getDashboardStats();
-        setRunningAgents(stats.running_agents || 0);
-      } catch {}
-    };
-    poll();
-    const id = setInterval(poll, 5000);
-    return () => clearInterval(id);
+  const refresh = useCallback(async () => {
+    try {
+      const stats = await getDashboardStats();
+      setRunningAgents(stats.running_agents || 0);
+    } catch {}
   }, []);
+
+  // Initial hydrate + safety-net reload every 60s. The fast loop is now
+  // driven by SSE state-change events from /api/events.
+  useEffect(() => {
+    refresh();
+    const safety = setInterval(refresh, 60000);
+    return () => clearInterval(safety);
+  }, [refresh]);
+
+  useFleetEvents((evt) => {
+    switch (evt.type) {
+      case 'mission_dispatched':
+      case 'mission_completed':
+      case 'mission_failed':
+      case 'mission_cancelled':
+      case 'mission_cancelled_no_approval':
+        refresh();
+        break;
+      default:
+        break;
+    }
+  });
 
   useEffect(() => {
     const diff = agentDelta - prevDelta.current;

@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { getMe } from './api/client';
+import { resetFleetEvents } from './hooks/useFleetEvents';
 
 const AuthContext = createContext(null);
 
@@ -31,11 +32,13 @@ export function AuthProvider({ children }) {
   const login = useCallback((token, userData) => {
     localStorage.setItem('devfleet_token', token);
     setUser(userData);
+    resetFleetEvents();
   }, []);
 
   const logout = useCallback(() => {
     localStorage.removeItem('devfleet_token');
     setUser(null);
+    resetFleetEvents();
   }, []);
 
   return (
