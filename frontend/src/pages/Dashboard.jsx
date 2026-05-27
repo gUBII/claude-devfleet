@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { listLanes, listMissions, listSessions, getDashboardStats, getLanesStudioSummary, getSystemStatus } from '../api/client';
+import { useFleetEvents } from '../hooks/useFleetEvents';
 import TunnelStatus from '../components/TunnelStatus';
 import BrandMark from '../components/BrandMark';
 
@@ -83,7 +84,46 @@ export default function Dashboard({ navigate }) {
     }
   }, []);
 
-  useEffect(() => { tick(); load(); const i = setInterval(load, 5000); const t = setInterval(tick, 30000); return () => { clearInterval(i); clearInterval(t); }; }, [load]);
+  // Initial hydrate + slow wall-clock tick. The dashboard now refreshes on
+  // SSE state-change events instead of a 5s HTTP poll. We still keep one
+  // safety-net reload every 60s so a missed event (reconnect gap, bus drop)
+  // can't leave the UI stale forever.
+  useEffect(() => {
+    tick();
+    load();
+    const clockTimer = setInterval(tick, 30000);
+    const safetyTimer = setInterval(load, 60000);
+    return () => { clearInterval(clockTimer); clearInterval(safetyTimer); };
+  }, [load]);
+
+  // Debounced reload — multiple events arriving within 250ms coalesce into a
+  // single fetch so a burst (e.g. several missions dispatching at once) does
+  // not hammer the backend.
+  const reloadTimer = useRef(null);
+  const scheduleReload = useCallback(() => {
+    if (reloadTimer.current) return;
+    reloadTimer.current = setTimeout(() => {
+      reloadTimer.current = null;
+      load();
+    }, 250);
+  }, [load]);
+  useEffect(() => () => { if (reloadTimer.current) clearTimeout(reloadTimer.current); }, []);
+
+  useFleetEvents((evt) => {
+    switch (evt.type) {
+      case 'mission_dispatched':
+      case 'mission_completed':
+      case 'mission_failed':
+      case 'mission_cancelled':
+      case 'mission_cancelled_no_approval':
+      case 'hitl_question':
+        scheduleReload();
+        break;
+      default:
+        // connected | ping | unknown — no refresh needed.
+        break;
+    }
+  });
 
   // Workstation keyboard shortcuts — only fire when no input/textarea has focus.
   useEffect(() => {
