@@ -197,6 +197,24 @@ def test_pr_create_stays_git_operator_not_task_creator():
     assert perm == "git.pr.create"
 
 
+def test_conversational_asks_do_not_become_task_creator():
+    """Bare fix/update/add aimed at the conversation must not render a draft card.
+
+    Regression guard for the over-broad action-verb arm that turned status
+    questions like "update me on the progress" into spurious mission drafts.
+    """
+    from chat_router import classify
+
+    for msg in (
+        "update me on the progress",
+        "fix your last answer please",
+        "add more detail to that explanation",
+    ):
+        persona, intent, _, _ = classify(msg)
+        assert persona != "task_creator", f"{msg!r} wrongly routed to task_creator"
+        assert intent != "create_task", f"{msg!r} wrongly got create_task intent"
+
+
 def test_default_is_researcher():
     from chat_router import classify
 

@@ -135,6 +135,9 @@ function MissionDraftCard({ draft, onCreateMission, onOpenMission }) {
         auto_dispatch: false,
       });
       setCreated(mission);
+    } catch {
+      // handleCreateMission already surfaces the error via setError; swallow the
+      // rejection here so the async onClick handler doesn't leave it unhandled.
     } finally {
       setSaving(false);
     }

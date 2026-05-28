@@ -61,10 +61,15 @@ _GIT_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 _TASK_KEYWORDS = re.compile(
+    # Explicit task nouns: "create/draft/make/queue/open/add/new a task|mission|ticket|todo".
     r"^\s*(please\s+)?("
     r"create|draft|make|queue|open|add|new"
     r")\s+(a|an|the)?\s*(task|mission|ticket|todo)\b"
-    r"|^\s*(please\s+)?(build|implement|fix|update|add)\b",
+    # Build-intent verbs only. fix/update/add are intentionally NOT bare-matched
+    # here: "update me on…", "fix your answer", "add more detail" are conversational
+    # and were rendering spurious draft cards. They fall to architect/researcher;
+    # an explicit "create a task to fix X" still routes here via the arm above.
+    r"|^\s*(please\s+)?(build|implement|develop|scaffold|set\s+up)\b",
     re.IGNORECASE,
 )
 _PLAN_KEYWORDS = re.compile(
