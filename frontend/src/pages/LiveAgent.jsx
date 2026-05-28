@@ -3,6 +3,7 @@ import { getSession, streamSession, cancelSession, takeoverSession, startMission
 import LiveOutput from '../components/LiveOutput';
 import ReportView from '../components/ReportView';
 import RemoteControlModal from '../components/RemoteControlModal';
+import { modelBrand } from '../lib/modelBrand';
 
 export default function LiveAgent({ sessionId, navigate }) {
   const [session, setSession] = useState(null);
@@ -220,7 +221,7 @@ export default function LiveAgent({ sessionId, navigate }) {
               <span className="text-sm text-muted">{formatTime(elapsed)}</span>
             )}
             {session?.model && (
-              <span className="tag">{session.model.replace('claude-', '').split('-')[0]}</span>
+              <span className="tag">{modelBrand(session.model)}</span>
             )}
             {config?.max_budget_usd && (
               <span className="text-sm text-muted">Budget: ${config.max_budget_usd}</span>

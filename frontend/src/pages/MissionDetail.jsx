@@ -7,6 +7,7 @@ import ReportView from '../components/ReportView';
 import DispatchPanel from '../components/DispatchPanel';
 import RemoteControlModal from '../components/RemoteControlModal';
 import { Switch, LED } from '../components/hw';
+import { modelBrand } from '../lib/modelBrand';
 
 const MISSION_STATE_EVENTS = new Set([
   'mission_dispatched',
@@ -203,7 +204,7 @@ export default function MissionDetail({ id, navigate }) {
 
   const canEdit = mission.status !== 'running';
   const canDispatch = mission.status !== 'running';
-  const runningSession = mission.sessions?.find(s => s.status === 'running');
+  const liveSession = mission.sessions?.find(s => s.status === 'running' || s.status === 'waiting_for_human');
 
   return (
     <div>
@@ -229,8 +230,8 @@ export default function MissionDetail({ id, navigate }) {
             <StatusBadge status={mission.status} />
             <span className="text-sm text-muted">{mission.project_name}</span>
             <span className="text-sm text-muted">{timeAgo(mission.updated_at)}</span>
-            {mission.model && mission.model !== 'claude-opus-4-7' && (
-              <span className="tag">{mission.model.replace('claude-', '').replace(/-\d+$/, '')}</span>
+            {mission.model && (
+              <span className="tag">{modelBrand(mission.model)}</span>
             )}
             {mission.mission_type && mission.mission_type !== 'implement' && (
               <span className="tag">{mission.mission_type}</span>
@@ -238,8 +239,8 @@ export default function MissionDetail({ id, navigate }) {
           </div>
         </div>
         <div className="flex gap-8">
-          {runningSession && !editing && (
-            <button className="btn btn-success" onClick={() => navigate('live', runningSession.id)}>
+          {liveSession && !editing && (
+            <button className="btn btn-success" onClick={() => navigate('live', liveSession.id)}>
               ▶ View Live
             </button>
           )}
@@ -510,14 +511,14 @@ export default function MissionDetail({ id, navigate }) {
               <div
                 key={s.id}
                 className="card card-clickable"
-                onClick={() => s.status === 'running' ? navigate('live', s.id) : null}
+                onClick={() => (s.status === 'running' || s.status === 'waiting_for_human') ? navigate('live', s.id) : null}
                 style={{ padding: '12px 16px' }}
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-12">
                     <StatusBadge status={s.status} />
                     <span className="text-sm text-muted">{timeAgo(s.started_at)}</span>
-                    {s.model && <span className="tag">{s.model.replace('claude-', '').split('-')[0]}</span>}
+                    {s.model && <span className="tag">{modelBrand(s.model)}</span>}
                     {s.ended_at && <span className="text-sm text-muted">
                       Duration: {Math.round((new Date(s.ended_at + 'Z') - new Date(s.started_at + 'Z')) / 60000)}m
                     </span>}
