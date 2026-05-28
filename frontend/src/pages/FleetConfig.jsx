@@ -4,6 +4,7 @@ import {
   createLane, deleteLane,
 } from '../api/client';
 import { Knob, Switch, Meter, LED } from '../components/hw';
+import { modelBrand } from '../lib/modelBrand';
 
 const MODELS = [
   'claude-sonnet-4-6',
@@ -95,7 +96,7 @@ function LaneEditor({ lane, onSave, onClose, onDeleted, navigate }) {
               onChange={e => setForm(f => ({ ...f, default_model: e.target.value }))}
             >
               {MODELS.map(m => (
-                <option key={m} value={m}>{m}</option>
+                <option key={m} value={m}>{modelBrand(m)}</option>
               ))}
             </select>
           </div>
@@ -246,7 +247,7 @@ function NewLaneModal({ onCreated, onClose, navigate }) {
               value={form.default_model}
               onChange={e => setForm(f => ({ ...f, default_model: e.target.value }))}
             >
-              {MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+              {MODELS.map(m => <option key={m} value={m}>{modelBrand(m)}</option>)}
             </select>
           </div>
 
@@ -377,7 +378,7 @@ export default function FleetConfig({ navigate }) {
               <span className="lane-icon">{lane.icon}</span>
               <div className="lane-meta">
                 <div className="lane-name">{lane.name.replace('_', ' ')}</div>
-                <div className="lane-model">{lane.default_model?.replace('claude-', '').replace('-4-', ' 4.')}</div>
+                <div className="lane-model">{modelBrand(lane.default_model)}</div>
               </div>
               <div className="lane-slots">
                 <span className="slot-running">{lane.running ?? 0}</span>
