@@ -287,6 +287,7 @@ async def _get_mission_context() -> list[types.TextContent]:
         "mission_type": data.get("mission_type", "implement"),
         "model": data.get("model", ""),
         "latest_report": data.get("latest_report"),
+        "skip_quality_gates": bool(data.get("skip_quality_gates", 0)),
     }
     return [types.TextContent(type="text", text=json.dumps(context, indent=2))]
 

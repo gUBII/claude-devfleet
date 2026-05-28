@@ -1336,15 +1336,16 @@ async def create_mission(request: Request, body: MissionCreate):
             """INSERT INTO missions (id, project_id, title, detailed_prompt, acceptance_criteria,
                priority, tags, model, max_turns, max_budget_usd, allowed_tools, mission_type,
                lane, parent_mission_id, depends_on, auto_dispatch, schedule_cron, schedule_enabled,
-               mission_number, created_by_email, created_by_name, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               mission_number, created_by_email, created_by_name, status, skip_quality_gates)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (mid, body.project_id, body.title, body.detailed_prompt,
              body.acceptance_criteria, body.priority, json.dumps(body.tags),
              body.model, body.max_turns, body.max_budget_usd,
              body.allowed_tools or "", body.mission_type, lane,
              body.parent_mission_id, json.dumps(body.depends_on),
              1 if body.auto_dispatch else 0, body.schedule_cron, schedule_enabled,
-             next_num, _by_email, _by_name, body.status or "pending"),
+             next_num, _by_email, _by_name, body.status or "pending",
+             1 if body.skip_quality_gates else 0),
         )
         await conn.commit()
         row = await conn.execute_fetchall(
@@ -1432,6 +1433,8 @@ async def update_mission(mid: str, body: MissionUpdate):
             updates["auto_dispatch"] = 1 if updates["auto_dispatch"] else 0
         if "schedule_enabled" in updates:
             updates["schedule_enabled"] = 1 if updates["schedule_enabled"] else 0
+        if "skip_quality_gates" in updates:
+            updates["skip_quality_gates"] = 1 if updates["skip_quality_gates"] else 0
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
         sets = ", ".join(f"{k}=?" for k in updates)
         vals = list(updates.values()) + [mid]

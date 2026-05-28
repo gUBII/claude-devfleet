@@ -117,6 +117,7 @@ TOOLS = [
                     "description": "List of mission IDs this depends on"
                 },
                 "auto_dispatch": {"type": "boolean", "description": "Auto-dispatch when dependencies complete"},
+                "skip_quality_gates": {"type": "boolean", "description": "Skip spawning REV-/TEST- quality-gate sub-missions and go directly to submit_report"},
                 "priority": {"type": "integer", "description": "Priority (0=normal, 1=high, 2=critical)"},
                 "model": {"type": "string", "description": "Model to use (default: claude-sonnet-4-6)"},
                 "mission_type": {
@@ -431,6 +432,7 @@ async def _create_mission(args: dict, conn) -> dict:
 
     depends_on = json.dumps(args.get("depends_on", []))
     auto_dispatch = 1 if args.get("auto_dispatch", False) else 0
+    skip_quality_gates = 1 if args.get("skip_quality_gates", False) else 0
 
     created_by_email = (args.get("created_by_email") or "").strip()
 
@@ -446,8 +448,8 @@ async def _create_mission(args: dict, conn) -> dict:
         """INSERT INTO missions
            (id, project_id, title, detailed_prompt, acceptance_criteria,
             depends_on, auto_dispatch, priority, model, mission_number,
-            created_by_email, mission_type, lane)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            created_by_email, mission_type, lane, skip_quality_gates)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             mid,
             args["project_id"],
@@ -462,6 +464,7 @@ async def _create_mission(args: dict, conn) -> dict:
             created_by_email or None,
             mission_type,
             lane,
+            skip_quality_gates,
         ),
     )
     await conn.commit()
