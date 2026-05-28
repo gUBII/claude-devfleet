@@ -170,6 +170,33 @@ def test_patch_keyword_picks_architect_quickpatch():
     assert intent == "quick_patch"
 
 
+def test_create_task_keyword_picks_task_creator():
+    from chat_router import classify
+
+    persona, intent, confirm, perm = classify("create a task to add dark mode")
+    assert persona == "task_creator"
+    assert intent == "create_task"
+    assert confirm is False
+    assert perm is None
+
+
+def test_action_shaped_build_request_picks_task_creator():
+    from chat_router import classify
+
+    persona, intent, _, _ = classify("build a compact settings page")
+    assert persona == "task_creator"
+    assert intent == "create_task"
+
+
+def test_pr_create_stays_git_operator_not_task_creator():
+    from chat_router import classify
+
+    persona, intent, _, perm = classify("open a PR from this branch")
+    assert persona == "git_operator"
+    assert intent == "pr_create"
+    assert perm == "git.pr.create"
+
+
 def test_default_is_researcher():
     from chat_router import classify
 
@@ -213,15 +240,6 @@ def test_pr_question_not_destructive():
     assert persona == "git_operator"
     # intent could be pr_create due to "show", but should not require confirm
     assert confirm is False
-
-
-def test_intent_for_pr_create():
-    from chat_router import classify
-
-    persona, intent, _, perm = classify("open a PR from this branch")
-    assert persona == "git_operator"
-    assert intent == "pr_create"
-    assert perm == "git.pr.create"
 
 
 # ─── Read intents need no permission ──────────────────────────────────────

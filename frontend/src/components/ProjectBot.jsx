@@ -16,6 +16,7 @@ const PERSONA_META = {
   researcher: { label: 'Researcher', model: 'Kiran', color: '#5bb8a6' },
   git_operator: { label: 'Git Operator', model: 'Probaho', color: '#d49a3a' },
   architect: { label: 'Architect', model: 'Arun', color: '#7a6cd0' },
+  task_creator: { label: 'Task Creator', model: 'Kiran', color: '#58a6ff' },
 };
 
 function PersonaBadge({ persona }) {
@@ -105,7 +106,126 @@ function ModelRouteChips({ routing }) {
   );
 }
 
-function MessageContent({ msg, projectId, onCreateMission, onOpenSession, currentEmail }) {
+function MissionDraftCard({ draft, onCreateMission, onOpenMission }) {
+  const [form, setForm] = useState(() => ({
+    title: draft.title || '',
+    detailed_prompt: draft.detailed_prompt || draft.prompt || '',
+    acceptance_criteria: draft.acceptance_criteria || '',
+    mission_type: draft.mission_type || 'implement',
+    priority: Number.isFinite(Number(draft.priority)) ? Number(draft.priority) : 0,
+    tagsText: Array.isArray(draft.tags) ? draft.tags.join(', ') : '',
+  }));
+  const [saving, setSaving] = useState(false);
+  const [created, setCreated] = useState(null);
+
+  const update = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
+  const canCreate = form.title.trim() && form.detailed_prompt.trim() && !saving && !created;
+
+  const submit = async () => {
+    if (!canCreate) return;
+    setSaving(true);
+    try {
+      const mission = await onCreateMission({
+        title: form.title.trim(),
+        detailed_prompt: form.detailed_prompt.trim(),
+        acceptance_criteria: form.acceptance_criteria.trim(),
+        mission_type: form.mission_type,
+        priority: Number(form.priority) || 0,
+        tags: form.tagsText.split(',').map(t => t.trim()).filter(Boolean),
+        auto_dispatch: false,
+      });
+      setCreated(mission);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="moofasa-draft">
+      <div className="moofasa-draft__label">Mission draft</div>
+      <label className="moofasa-draft__field">
+        <span>Title</span>
+        <input
+          value={form.title}
+          onChange={e => update('title', e.target.value)}
+          disabled={!!created}
+        />
+      </label>
+      <label className="moofasa-draft__field">
+        <span>Prompt</span>
+        <textarea
+          value={form.detailed_prompt}
+          onChange={e => update('detailed_prompt', e.target.value)}
+          disabled={!!created}
+          rows={5}
+        />
+      </label>
+      <label className="moofasa-draft__field">
+        <span>Acceptance criteria</span>
+        <textarea
+          value={form.acceptance_criteria}
+          onChange={e => update('acceptance_criteria', e.target.value)}
+          disabled={!!created}
+          rows={4}
+        />
+      </label>
+      <div className="moofasa-draft__grid">
+        <label className="moofasa-draft__field">
+          <span>Type</span>
+          <select
+            value={form.mission_type}
+            onChange={e => update('mission_type', e.target.value)}
+            disabled={!!created}
+          >
+            <option value="implement">Implement</option>
+            <option value="fix">Fix</option>
+            <option value="test">Test</option>
+            <option value="review">Review</option>
+            <option value="explore">Explore</option>
+          </select>
+        </label>
+        <label className="moofasa-draft__field">
+          <span>Priority</span>
+          <input
+            type="number"
+            value={form.priority}
+            onChange={e => update('priority', e.target.value)}
+            disabled={!!created}
+          />
+        </label>
+      </div>
+      <label className="moofasa-draft__field">
+        <span>Tags</span>
+        <input
+          value={form.tagsText}
+          onChange={e => update('tagsText', e.target.value)}
+          disabled={!!created}
+        />
+      </label>
+      <div className="moofasa-draft__actions">
+        <button
+          className="btn btn-primary"
+          style={{ fontSize: 12, padding: '5px 12px' }}
+          onClick={submit}
+          disabled={!canCreate}
+        >
+          {saving ? 'Creating...' : created ? 'Draft created' : 'Create draft'}
+        </button>
+        {created && (
+          <button
+            className="btn btn-ghost"
+            style={{ fontSize: 12, padding: '5px 12px' }}
+            onClick={() => onOpenMission?.(created.id)}
+          >
+            Open mission
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MessageContent({ msg, projectId, onCreateMission, onOpenSession, onOpenMission, currentEmail }) {
   const content = msg.content || '';
   const draft = parseMissionBlock(content);
   const displayText = content.replace(/```mission[\s\S]*?```/g, '').trim();
@@ -134,20 +254,11 @@ function MessageContent({ msg, projectId, onCreateMission, onOpenSession, curren
         )
       )}
       {draft && (
-        <div className="moofasa-draft">
-          <div className="moofasa-draft__label">Mission Draft</div>
-          <div className="moofasa-draft__title">{draft.title}</div>
-          {draft.acceptance_criteria && (
-            <div className="moofasa-draft__criteria">{draft.acceptance_criteria}</div>
-          )}
-          <button
-            className="btn btn-primary"
-            style={{ fontSize: 12, padding: '5px 12px' }}
-            onClick={() => onCreateMission(draft)}
-          >
-            Create Mission →
-          </button>
-        </div>
+        <MissionDraftCard
+          draft={draft}
+          onCreateMission={onCreateMission}
+          onOpenMission={onOpenMission}
+        />
       )}
       {msg.handoff && (
         <HandoffCard handoff={msg.handoff} onOpen={onOpenSession} />
@@ -404,13 +515,15 @@ export default function ProjectBot({ projectId, projectName, onClose, navigate }
 
   const handleCreateMission = async (draft) => {
     try {
-      await createMission({ ...draft, project_id: projectId, status: 'draft' });
+      const mission = await createMission({ ...draft, project_id: projectId, status: 'draft' });
       setMessages(prev => [
         ...prev,
-        { role: 'assistant', content: '✓ Mission created as a draft. Dispatch it from the mission board when ready.' },
+        { role: 'assistant', content: 'Mission created as a draft. Dispatch it from the mission board when ready.' },
       ]);
+      return mission;
     } catch (e) {
       setError(e.message || 'Failed to create mission');
+      throw e;
     }
   };
 
@@ -455,6 +568,7 @@ export default function ProjectBot({ projectId, projectName, onClose, navigate }
                 projectId={projectId}
                 onCreateMission={handleCreateMission}
                 onOpenSession={(sid) => navigate?.('live', sid)}
+                onOpenMission={(mid) => navigate?.('mission', mid)}
                 currentEmail={currentEmail}
               />
             )}

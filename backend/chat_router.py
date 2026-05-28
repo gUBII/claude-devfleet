@@ -52,9 +52,19 @@ _SLASH_TO_PERSONA: dict[str, ChatPersona] = {
     "opus": "architect",        # legacy — TODO(2026-06-30): remove after telemetry confirms zero usage
 }
 
-# Two heuristic vocabularies, matched against the lowercased message.
+# Heuristic vocabularies, matched against the operator message. Git stays first
+# in routing because "open a PR" / "merge PR" are concrete git operations; task
+# creation is a safe review-card path, so it beats planning for action-shaped
+# requests like "create a task to fix login".
 _GIT_KEYWORDS = re.compile(
     r"\b(merge|rebase|push|pull request|pr\b|branch|commit|gh\b|git\b|cherry-pick|squash)",
+    re.IGNORECASE,
+)
+_TASK_KEYWORDS = re.compile(
+    r"^\s*(please\s+)?("
+    r"create|draft|make|queue|open|add|new"
+    r")\s+(a|an|the)?\s*(task|mission|ticket|todo)\b"
+    r"|^\s*(please\s+)?(build|implement|fix|update|add)\b",
     re.IGNORECASE,
 )
 _PLAN_KEYWORDS = re.compile(
@@ -86,6 +96,8 @@ def _detect_intent(message: str, persona: ChatPersona) -> str:
         if "patch" in lo or "fix" in lo:
             return "quick_patch"
         return "plan"
+    if persona == "task_creator":
+        return "create_task"
     # git_operator from here on
     if "merge" in lo and ("pr" in lo or "pull request" in lo):
         return "pr_merge"
@@ -132,6 +144,8 @@ def classify(
         #    more action-specific; ambiguous messages fall to researcher.
         if _GIT_KEYWORDS.search(message):
             persona = "git_operator"
+        elif _TASK_KEYWORDS.search(message):
+            persona = "task_creator"
         elif _PLAN_KEYWORDS.search(message):
             persona = "architect"
         else:

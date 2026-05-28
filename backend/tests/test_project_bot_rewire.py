@@ -8,6 +8,7 @@ attribution, and SSE event emission.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 
 import aiosqlite
@@ -381,3 +382,64 @@ async def test_force_persona_overrides_keyword_heuristic(tmp_db, monkeypatch):
     events = _decode(chunks)
     persona = next(e for e in events if e["type"] == "persona")
     assert persona["persona"] == "researcher"
+
+
+@pytest.mark.asyncio
+async def test_task_creator_emits_reviewable_mission_draft(tmp_db, monkeypatch):
+    """A create-task chat turn should stop at a reviewable draft card.
+
+    It must not create a mission row or dispatch an agent; the frontend creates
+    the draft only after the operator reviews/edits the card.
+    """
+    from project_bot import stream_bot_response
+
+    project, user = await _seed(tmp_db)
+
+    async def fail_inline(*a, **kw):
+        raise AssertionError("task_creator must not call the SDK inline persona")
+        yield {"type": "text", "text": "unreachable"}
+
+    async def fail_git(*a, **kw):
+        raise AssertionError("task_creator must not start a git_operator turn")
+
+    monkeypatch.setattr("chat_personas.run_inline_persona", fail_inline)
+    monkeypatch.setattr("chat_personas.start_git_operator_turn", fail_git)
+
+    chunks = await _collect(stream_bot_response(
+        project["id"], project, "create a task to add dark mode", user,
+    ))
+    events = _decode(chunks)
+    assert [e["type"] for e in events] == ["persona", "text", "done"]
+    assert events[0]["persona"] == "task_creator"
+    assert events[0]["intent"] == "create_task"
+
+    match = re.search(r"```mission\s*\n([\s\S]*?)\n```", events[1]["text"])
+    assert match, events[1]["text"]
+    draft = json.loads(match.group(1))
+    assert draft["title"] == "Add dark mode"
+    assert draft["mission_type"] == "implement"
+    assert draft["auto_dispatch"] is False
+    assert "Operator request" in draft["detailed_prompt"]
+
+    async with aiosqlite.connect(tmp_db) as conn:
+        history = await (await conn.execute(
+            "SELECT role, content, user_id, persona FROM project_bot_history "
+            "WHERE project_id=?",
+            (project["id"],),
+        )).fetchall()
+        actions = await (await conn.execute(
+            "SELECT status, intent, persona FROM chat_actions WHERE project_id=?",
+            (project["id"],),
+        )).fetchall()
+        missions = await (await conn.execute(
+            "SELECT COUNT(*) FROM missions WHERE project_id=?",
+            (project["id"],),
+        )).fetchone()
+
+    assert len(history) == 1
+    assert history[0][0] == "assistant"
+    assert history[0][2] == user["sub"]
+    assert history[0][3] == "task_creator"
+    assert "```mission" in history[0][1]
+    assert actions == [("completed", "create_task", "task_creator")]
+    assert missions[0] == 0

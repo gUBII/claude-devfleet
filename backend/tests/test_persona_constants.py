@@ -5,10 +5,15 @@ from __future__ import annotations
 import pytest
 
 
-def test_three_personas_only():
+def test_personas_only():
     from models import CHAT_PERSONAS
 
-    assert set(CHAT_PERSONAS.keys()) == {"researcher", "git_operator", "architect"}
+    assert set(CHAT_PERSONAS.keys()) == {
+        "researcher",
+        "git_operator",
+        "architect",
+        "task_creator",
+    }
 
 
 def test_each_persona_resolves_to_valid_model():
@@ -25,6 +30,7 @@ def test_persona_model_assignment_matches_spec():
     from models import CHAT_PERSONAS
 
     assert "haiku" in CHAT_PERSONAS["researcher"]["model"].lower()
+    assert "haiku" in CHAT_PERSONAS["task_creator"]["model"].lower()
     assert "sonnet" in CHAT_PERSONAS["git_operator"]["model"].lower()
     assert "opus" in CHAT_PERSONAS["architect"]["model"].lower()
 
@@ -35,6 +41,7 @@ def test_only_git_operator_requires_confirm():
     assert CHAT_PERSONAS["researcher"]["requires_confirm"] is False
     assert CHAT_PERSONAS["git_operator"]["requires_confirm"] is True
     assert CHAT_PERSONAS["architect"]["requires_confirm"] is False
+    assert CHAT_PERSONAS["task_creator"]["requires_confirm"] is False
 
 
 def test_only_git_operator_gets_bash():
@@ -43,6 +50,7 @@ def test_only_git_operator_gets_bash():
 
     assert "Bash" not in CHAT_PERSONAS["researcher"]["allowed_tools"]
     assert "Bash" not in CHAT_PERSONAS["architect"]["allowed_tools"]
+    assert "Bash" not in CHAT_PERSONAS["task_creator"]["allowed_tools"]
     assert "Bash" in CHAT_PERSONAS["git_operator"]["allowed_tools"]
 
 
@@ -51,6 +59,7 @@ def test_intent_permissions_keys_match_known_intents():
 
     expected_intents = {
         "read", "plan", "quick_patch",
+        "create_task",
         "commit", "push", "pr_create", "pr_merge",
         "dispatch", "git_other",
     }

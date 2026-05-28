@@ -501,12 +501,12 @@ class ProjectChatRequest(BaseModel):
 
 # ── Persona chat — RBAC + persona registry ──────────────────────────────────
 #
-# Three personas, three models. The router (backend/chat_router.py) classifies
+# Chat personas and their models. The router (backend/chat_router.py) classifies
 # each chat message into one persona; permission checks gate which intents the
 # user can actually execute. CHAT_PERSONAS is the single source of truth so
 # Fleet Config can mutate models per persona without scattering string literals.
 
-ChatPersona = Literal["researcher", "git_operator", "architect"]
+ChatPersona = Literal["researcher", "git_operator", "architect", "task_creator"]
 
 # Permission names used in user_permissions.permission. Implicit `git.read`
 # is granted to every authenticated user (no row needed) — the literal isn't
@@ -527,6 +527,7 @@ INTENT_PERMISSIONS: dict[str, Optional[str]] = {
     "read":         None,
     "plan":         None,
     "quick_patch":  None,
+    "create_task":  None,
     "commit":       "git.commit",
     "push":         "git.push",
     "pr_create":    "git.pr.create",
@@ -617,6 +618,18 @@ CHAT_PERSONAS: dict[str, dict] = {
             "Risks / Files Touched).\n"
             "For quick patches, output a single ```patch``` fence with a unified diff the "
             "operator can `git apply` manually. NEVER execute — you are read-only."
+        ),
+    },
+    "task_creator": {
+        "model": "claude-haiku-4-5-20251001",
+        "allowed_tools": [],
+        "permission_mode": "default",
+        "max_turns": 1,
+        "requires_confirm": False,
+        "baseline_permission": None,
+        "system_prompt_extra": (
+            "You turn an operator request into a reviewable draft mission. "
+            "You do not dispatch agents or modify files."
         ),
     },
 }

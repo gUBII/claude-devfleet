@@ -10,6 +10,8 @@ this module is the dispatcher that:
   3. Performs RBAC via `auth.has_permission`. Denied turns audit-log and
      return a user-safe error — they never reach the persona.
   4. Dispatches:
+       - task_creator → deterministic draft card, no SDK, no mission row until
+         the operator reviews and clicks Create.
        - researcher / architect → `chat_personas.run_inline_persona` (direct
          SDK call, streams text events).
        - git_operator → `chat_personas.start_git_operator_turn` (synthetic
@@ -33,8 +35,68 @@ Backward compatibility:
 
 import json
 import logging
+import re
 
 log = logging.getLogger("devfleet.project_bot")
+
+
+def _task_title_from_message(message: str) -> str:
+    text = (message or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"[.?!]+$", "", text).strip()
+    text = re.sub(
+        r"^(please\s+)?(create|draft|make|queue|open|new)\s+"
+        r"(a|an|the)?\s*(task|mission|ticket|todo)\s*"
+        r"(to|for|that|about)?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
+    text = re.sub(
+        r"^(please\s+)?add\s+(a|an|the)?\s*(task|mission|ticket|todo)\s*"
+        r"(to|for|that|about)?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
+    if not text:
+        text = (message or "").strip() or "New mission from chat"
+    title = text[:1].upper() + text[1:]
+    return title[:120].rstrip()
+
+
+def _build_task_creator_reply(message: str, project: dict) -> tuple[str, dict]:
+    title = _task_title_from_message(message)
+    project_name = project.get("name") or "this project"
+    detailed_prompt = (
+        f"Operator request:\n{message.strip()}\n\n"
+        f"Implement this as a normal DevFleet mission for {project_name}. "
+        "Before editing, inspect the project, identify the relevant files, "
+        "and keep the change scoped to the request. Report what changed, "
+        "what was tested, and any follow-up risks."
+    )
+    acceptance_criteria = (
+        "- The requested change is implemented in the project.\n"
+        "- Existing behavior outside the request is preserved.\n"
+        "- Relevant tests or manual checks are run and reported."
+    )
+    draft = {
+        "title": title,
+        "detailed_prompt": detailed_prompt,
+        "acceptance_criteria": acceptance_criteria,
+        "mission_type": "implement",
+        "priority": 0,
+        "tags": ["chat-draft"],
+        "auto_dispatch": False,
+    }
+    reply = (
+        "I drafted a mission from your request. Review it, tighten anything "
+        "that matters, then create it as a board draft.\n\n"
+        "```mission\n"
+        + json.dumps(draft, indent=2)
+        + "\n```"
+    )
+    return reply, draft
 
 
 async def stream_bot_response(
@@ -97,6 +159,35 @@ async def stream_bot_response(
             )
             + "\n\n"
         )
+        yield "data: " + json.dumps({"type": "done"}) + "\n\n"
+        return
+
+    if persona == "task_creator":
+        reply, draft = _build_task_creator_reply(clean_message, project)
+        await chat_audit.log_action(
+            project_id,
+            user_id,
+            persona,
+            intent,
+            status="completed",
+            data={
+                "message_preview": clean_message[:200],
+                "draft_title": draft["title"],
+            },
+        )
+        conn = await db.get_db()
+        try:
+            await conn.execute(
+                "INSERT INTO project_bot_history "
+                "(project_id, role, content, is_plan, plan_title, user_id, persona) "
+                "VALUES (?, 'assistant', ?, 0, '', ?, ?)",
+                (pid, reply, user_id, persona),
+            )
+            await conn.commit()
+        finally:
+            await conn.close()
+
+        yield "data: " + json.dumps({"type": "text", "text": reply}) + "\n\n"
         yield "data: " + json.dumps({"type": "done"}) + "\n\n"
         return
 

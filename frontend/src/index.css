@@ -2586,6 +2586,54 @@ body {
   margin-bottom: 10px;
   line-height: 1.45;
 }
+.moofasa-draft__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.moofasa-draft__field span {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.moofasa-draft__field input,
+.moofasa-draft__field textarea,
+.moofasa-draft__field select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 7px 8px;
+}
+.moofasa-draft__field textarea {
+  resize: vertical;
+  min-height: 72px;
+}
+.moofasa-draft__field input:disabled,
+.moofasa-draft__field textarea:disabled,
+.moofasa-draft__field select:disabled {
+  opacity: 0.72;
+  cursor: default;
+}
+.moofasa-draft__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 72px;
+  gap: 8px;
+}
+.moofasa-draft__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
 
 .moofasa-plan-actions {
   margin-top: 10px;
