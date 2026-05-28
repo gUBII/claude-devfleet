@@ -63,6 +63,12 @@ async def in_memory_db():
         "ALTER TABLE missions ADD COLUMN created_by_email TEXT DEFAULT ''",
         "ALTER TABLE missions ADD COLUMN created_by_name TEXT DEFAULT ''",
         "ALTER TABLE missions ADD COLUMN skip_quality_gates INTEGER DEFAULT 0",
+        "ALTER TABLE missions ADD COLUMN idempotency_key TEXT",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_missions_idempotency_key "
+        "ON missions(idempotency_key) WHERE idempotency_key IS NOT NULL",
+        "ALTER TABLE agent_sessions ADD COLUMN idempotency_key TEXT",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_idempotency_key "
+        "ON agent_sessions(idempotency_key) WHERE idempotency_key IS NOT NULL",
     ]
 
     for migration in migrations:

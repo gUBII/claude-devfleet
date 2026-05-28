@@ -230,6 +230,15 @@ TOOLS = [
                         "machine-level git config."
                     ),
                 },
+                "idempotency_key": {
+                    "type": "string",
+                    "description": (
+                        "Optional client-supplied key to make retries safe. A second "
+                        "create_mission with the same key returns the original mission "
+                        "(idempotent_replay=true) instead of creating a duplicate; new "
+                        "args are ignored on replay."
+                    ),
+                },
             },
             "required": ["project_id", "title", "prompt"],
         },
@@ -250,6 +259,15 @@ TOOLS = [
                         "mission's project — dispatch is denied (SCOPE_DENIED) if you "
                         "are not bound to that project. Omit only for trusted "
                         "system/admin callers (admin-equivalent fallback)."
+                    ),
+                },
+                "idempotency_key": {
+                    "type": "string",
+                    "description": (
+                        "Optional client-supplied key to make retries safe. A second "
+                        "dispatch_mission with the same key returns the original session "
+                        "(success or failure) without spawning a second agent. Use a "
+                        "fresh key to force a new attempt."
                     ),
                 },
             },
@@ -350,6 +368,14 @@ TOOLS = [
                 "model": {"type": "string"},
                 "mission_type": {"type": "string"},
                 "lane": {"type": "string"},
+                "acting_user_email": {
+                    "type": "string",
+                    "description": (
+                        "Your DevFleet account email. Scope-checked against the "
+                        "mission's project — update is denied (SCOPE_DENIED) if you "
+                        "are not bound to that project."
+                    ),
+                },
             },
             "required": ["mission_id"],
         },
@@ -364,6 +390,14 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "mission_id": {"type": "string", "description": "Mission ID to delete"},
+                "acting_user_email": {
+                    "type": "string",
+                    "description": (
+                        "Your DevFleet account email. Scope-checked against the "
+                        "mission's project — delete is denied (SCOPE_DENIED) if you "
+                        "are not bound to that project."
+                    ),
+                },
             },
             "required": ["mission_id"],
         },
@@ -522,6 +556,33 @@ async def _create_mission(args: dict, conn) -> dict:
     if denied:
         return denied
 
+    # Idempotency replay: a retry with the same key returns the original mission
+    # (re-derived from the live row so the shape matches a fresh create) instead
+    # of creating a duplicate. New args on a replay are ignored by design — the
+    # key identifies one logical create. Runs AFTER the scope gate so the key
+    # can't be used to bypass project scope.
+    idem_key = (args.get("idempotency_key") or "").strip() or None
+    if idem_key:
+        cur = await conn.execute(
+            "SELECT id, mission_number, title, project_id, mission_type, lane, "
+            "auto_dispatch, depends_on FROM missions WHERE idempotency_key = ?",
+            (idem_key,),
+        )
+        existing = await cur.fetchone()
+        if existing:
+            existing = dict(existing)
+            return {
+                "id": existing["id"],
+                "mission_number": existing["mission_number"],
+                "title": existing["title"],
+                "project_id": existing["project_id"],
+                "mission_type": existing["mission_type"],
+                "lane": existing["lane"],
+                "auto_dispatch": bool(existing["auto_dispatch"]),
+                "depends_on": json.loads(existing["depends_on"] or "[]"),
+                "idempotent_replay": True,
+            }
+
     # Get next mission number
     cur = await conn.execute(
         "SELECT COALESCE(MAX(mission_number), 0) + 1 FROM missions WHERE project_id = ?",
@@ -547,8 +608,9 @@ async def _create_mission(args: dict, conn) -> dict:
         """INSERT INTO missions
            (id, project_id, title, detailed_prompt, acceptance_criteria,
             depends_on, auto_dispatch, priority, model, mission_number,
-            created_by_email, mission_type, lane, skip_quality_gates)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            created_by_email, mission_type, lane, skip_quality_gates,
+            idempotency_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             mid,
             args["project_id"],
@@ -564,6 +626,7 @@ async def _create_mission(args: dict, conn) -> dict:
             mission_type,
             lane,
             skip_quality_gates,
+            idem_key,
         ),
     )
     await conn.commit()
@@ -577,6 +640,7 @@ async def _create_mission(args: dict, conn) -> dict:
         "lane": lane,
         "auto_dispatch": bool(auto_dispatch),
         "depends_on": args.get("depends_on", []),
+        "idempotent_replay": False,
     }
 
 
@@ -603,6 +667,29 @@ async def _dispatch_mission(args: dict, conn) -> dict:
     denied = await _enforce_scope("dispatch_mission", args, mission.get("project_id"))
     if denied:
         return denied
+
+    # Idempotency replay: a retry with the same key returns the original session
+    # (success OR failure) and never spawns a second agent. Must run BEFORE the
+    # "already running" check so retrying an in-flight dispatch returns the
+    # session rather than the error. New attempts need a fresh key.
+    idem_key = (args.get("idempotency_key") or "").strip() or None
+    if idem_key:
+        cur = await conn.execute(
+            "SELECT id, status, model FROM agent_sessions WHERE idempotency_key = ?",
+            (idem_key,),
+        )
+        existing = await cur.fetchone()
+        if existing:
+            existing = dict(existing)
+            return {
+                "session_id": existing["id"],
+                "mission_id": mid,
+                "status": "dispatched",
+                "session_status": existing["status"],
+                "model": existing["model"],
+                "idempotent_replay": True,
+                "hint": "Replayed an existing dispatch for this idempotency_key — no new agent spawned. Use a fresh key to retry.",
+            }
 
     if mission["status"] == "running":
         return {"error": "Mission is already running"}
@@ -631,8 +718,8 @@ async def _dispatch_mission(args: dict, conn) -> dict:
     session_id = str(_uuid.uuid4())
     model_used = args.get("model") or mission.get("model") or "claude-sonnet-4-6"
     await conn.execute(
-        "INSERT INTO agent_sessions (id, mission_id, model) VALUES (?, ?, ?)",
-        (session_id, mid, model_used),
+        "INSERT INTO agent_sessions (id, mission_id, model, idempotency_key) VALUES (?, ?, ?, ?)",
+        (session_id, mid, model_used, idem_key),
     )
     await conn.execute(
         "UPDATE missions SET status='running', updated_at=? WHERE id=?",
@@ -670,6 +757,7 @@ async def _dispatch_mission(args: dict, conn) -> dict:
         "mission_id": mid,
         "status": "dispatched",
         "model": model_used,
+        "idempotent_replay": False,
         "hint": "Mission is now running. Use get_mission_status to check progress.",
     }
 
@@ -881,10 +969,15 @@ async def _cancel_mission(args: dict, conn) -> dict:
 async def _update_mission(args: dict, conn) -> dict:
     mid = args["mission_id"]
 
-    cur = await conn.execute("SELECT status FROM missions WHERE id = ?", (mid,))
+    cur = await conn.execute("SELECT status, project_id FROM missions WHERE id = ?", (mid,))
     row = await cur.fetchone()
     if not row:
         return {"error": f"Mission {mid} not found"}
+
+    denied = await _enforce_scope("update_mission", args, dict(row)["project_id"])
+    if denied:
+        return denied
+
     if row["status"] == "running":
         return {"error": "Mission is running — cancel it first before editing"}
 
@@ -937,10 +1030,15 @@ async def _update_mission(args: dict, conn) -> dict:
 async def _delete_mission(args: dict, conn) -> dict:
     mid = args["mission_id"]
 
-    cur = await conn.execute("SELECT status FROM missions WHERE id = ?", (mid,))
+    cur = await conn.execute("SELECT status, project_id FROM missions WHERE id = ?", (mid,))
     row = await cur.fetchone()
     if not row:
         return {"error": f"Mission {mid} not found"}
+
+    denied = await _enforce_scope("delete_mission", args, dict(row)["project_id"])
+    if denied:
+        return denied
+
     if row["status"] == "running":
         return {"error": "Mission is running — cancel it first before deleting"}
 

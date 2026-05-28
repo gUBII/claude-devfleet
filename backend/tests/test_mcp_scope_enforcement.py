@@ -26,7 +26,12 @@ os.environ.setdefault(
 )
 
 import auth
-from mcp_external import _enforce_scope, _dispatch_mission
+from mcp_external import (
+    _enforce_scope,
+    _dispatch_mission,
+    _update_mission,
+    _delete_mission,
+)
 
 
 @pytest.fixture
@@ -156,3 +161,36 @@ async def test_dispatch_denied_creates_no_session(patch_auth, seeded_db):
     assert (await cur.fetchone())["c"] == 0
     cur = await seeded_db.execute("SELECT status FROM missions WHERE id = 'm1'")
     assert (await cur.fetchone())["status"] == "draft"
+
+
+async def test_update_denied_leaves_mission_unchanged(patch_auth, seeded_db):
+    patch_auth["users"]["hasan@devfleet.local"] = {"id": "u-hasan", "role": "user"}
+    patch_auth["access"][("u-hasan", "p1")] = False
+
+    result = await _update_mission(
+        {
+            "mission_id": "m1",
+            "title": "hijacked title",
+            "acting_user_email": "hasan@devfleet.local",
+        },
+        seeded_db,
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "SCOPE_DENIED"
+    cur = await seeded_db.execute("SELECT title FROM missions WHERE id = 'm1'")
+    assert (await cur.fetchone())["title"] == "Test mission"
+
+
+async def test_delete_denied_keeps_mission(patch_auth, seeded_db):
+    patch_auth["users"]["hasan@devfleet.local"] = {"id": "u-hasan", "role": "user"}
+    patch_auth["access"][("u-hasan", "p1")] = False
+
+    result = await _delete_mission(
+        {"mission_id": "m1", "acting_user_email": "hasan@devfleet.local"}, seeded_db
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "SCOPE_DENIED"
+    cur = await seeded_db.execute("SELECT COUNT(*) AS c FROM missions WHERE id = 'm1'")
+    assert (await cur.fetchone())["c"] == 1

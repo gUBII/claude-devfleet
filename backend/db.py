@@ -382,6 +382,18 @@ async def init_db():
             "INSERT OR IGNORE INTO user_project_access (user_id, project_id, granted_by) "
             "SELECT u.id, p.id, 'system-seed-v17' FROM users u CROSS JOIN projects p "
             "WHERE u.role != 'admin'",
+            # v18: idempotency keys for the create_mission / dispatch_mission MCP
+            # tools. Lets a client safely retry after a network blip without
+            # creating a duplicate mission or spawning a second agent. NULL = no
+            # key supplied; the partial unique index only constrains non-NULL keys
+            # (SQLite treats multiple NULLs as distinct, but the WHERE clause keeps
+            # the index small and the intent explicit).
+            "ALTER TABLE missions ADD COLUMN idempotency_key TEXT",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_missions_idempotency_key "
+            "ON missions(idempotency_key) WHERE idempotency_key IS NOT NULL",
+            "ALTER TABLE agent_sessions ADD COLUMN idempotency_key TEXT",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_idempotency_key "
+            "ON agent_sessions(idempotency_key) WHERE idempotency_key IS NOT NULL",
         ]
         for migration in migrations:
             try:
