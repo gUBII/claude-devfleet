@@ -52,24 +52,30 @@ _SLASH_TO_PERSONA: dict[str, ChatPersona] = {
     "opus": "architect",        # legacy — TODO(2026-06-30): remove after telemetry confirms zero usage
 }
 
-# Heuristic vocabularies, matched against the operator message. Git stays first
-# in routing because "open a PR" / "merge PR" are concrete git operations; task
-# creation is a safe review-card path, so it beats planning for action-shaped
-# requests like "create a task to fix login".
+# Heuristic vocabularies, matched against the operator message. Routing order is
+# deliberate: explicit task creation > git > implicit build-intent > plan. The
+# leading imperative verb is the intent; a subordinate "to …" clause is payload,
+# so "create a task to merge X" drafts a task and does NOT route to git_operator.
+# Bare commands like "merge this PR" still hit git because they match no explicit
+# task arm.
 _GIT_KEYWORDS = re.compile(
     r"\b(merge|rebase|push|pull request|pr\b|branch|commit|gh\b|git\b|cherry-pick|squash)",
     re.IGNORECASE,
 )
-_TASK_KEYWORDS = re.compile(
-    # Explicit task nouns: "create/draft/make/queue/open/add/new a task|mission|ticket|todo".
+# Explicit task creation: "create/draft/make/queue/open/add/new a task|mission|ticket|todo".
+# Checked BEFORE git so incidental git words in the payload don't hijack the intent.
+_EXPLICIT_TASK_KEYWORDS = re.compile(
     r"^\s*(please\s+)?("
     r"create|draft|make|queue|open|add|new"
-    r")\s+(a|an|the)?\s*(task|mission|ticket|todo)\b"
-    # Build-intent verbs only. fix/update/add are intentionally NOT bare-matched
-    # here: "update me on…", "fix your answer", "add more detail" are conversational
-    # and were rendering spurious draft cards. They fall to architect/researcher;
-    # an explicit "create a task to fix X" still routes here via the arm above.
-    r"|^\s*(please\s+)?(build|implement|develop|scaffold|set\s+up)\b",
+    r")\s+(a|an|the)?\s*(task|mission|ticket|todo)\b",
+    re.IGNORECASE,
+)
+# Implicit build-intent: "build/implement/develop/… <feature>". Checked AFTER git
+# so genuine commands ("merge this", "push") still route to git_operator. fix/update/add
+# are intentionally excluded — bare "update me on…", "fix your answer", "add more detail"
+# are conversational and were rendering spurious draft cards (they fall to architect/researcher).
+_TASK_ACTION_KEYWORDS = re.compile(
+    r"^\s*(please\s+)?(build|implement|develop|scaffold|set\s+up)\b",
     re.IGNORECASE,
 )
 _PLAN_KEYWORDS = re.compile(
@@ -147,9 +153,11 @@ def classify(
     else:
         # 2. Keyword heuristic. Git verbs beat plan verbs because they're
         #    more action-specific; ambiguous messages fall to researcher.
-        if _GIT_KEYWORDS.search(message):
+        if _EXPLICIT_TASK_KEYWORDS.search(message):
+            persona = "task_creator"
+        elif _GIT_KEYWORDS.search(message):
             persona = "git_operator"
-        elif _TASK_KEYWORDS.search(message):
+        elif _TASK_ACTION_KEYWORDS.search(message):
             persona = "task_creator"
         elif _PLAN_KEYWORDS.search(message):
             persona = "architect"

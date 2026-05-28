@@ -215,6 +215,30 @@ def test_conversational_asks_do_not_become_task_creator():
         assert intent != "create_task", f"{msg!r} wrongly got create_task intent"
 
 
+def test_explicit_task_wins_over_git_vocabulary():
+    """The leading imperative verb is the intent; a subordinate "to …" clause is
+    payload. "create a task to merge X" drafts a task, not a git operation."""
+    from chat_router import classify
+
+    for msg in (
+        "create a task to merge the release branch",
+        "draft a mission to commit the changelog",
+        "make a ticket to rebase onto main",
+    ):
+        persona, intent, _, _ = classify(msg)
+        assert persona == "task_creator", f"{msg!r} should draft a task"
+        assert intent == "create_task"
+
+
+def test_bare_git_command_still_routes_to_git_operator():
+    """Implicit/bare commands without an explicit task arm still hit git_operator."""
+    from chat_router import classify
+
+    for msg in ("merge this PR", "push the branch", "rebase onto main"):
+        persona, _, _, _ = classify(msg)
+        assert persona == "git_operator", f"{msg!r} should route to git_operator"
+
+
 def test_default_is_researcher():
     from chat_router import classify
 
