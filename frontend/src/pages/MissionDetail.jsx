@@ -1,11 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getMission, updateMission, dispatchMission, deleteMission, generateNextMission, resumeMission, startMissionRemoteControl, stopRemoteControl, listSessions, getMissionEvents, setMissionSchedule, removeMissionSchedule, getSystemFeatures } from '../api/client';
+import { useFleetEvents } from '../hooks/useFleetEvents';
 import StatusBadge from '../components/StatusBadge';
 import PromptEditor from '../components/PromptEditor';
 import ReportView from '../components/ReportView';
 import DispatchPanel from '../components/DispatchPanel';
 import RemoteControlModal from '../components/RemoteControlModal';
 import { Switch, LED } from '../components/hw';
+
+const MISSION_STATE_EVENTS = new Set([
+  'mission_dispatched',
+  'mission_completed',
+  'mission_failed',
+  'mission_cancelled',
+  'mission_cancelled_no_approval',
+  'hitl_question',
+]);
 
 function timeAgo(dateStr) {
   if (!dateStr) return '';
@@ -68,18 +78,29 @@ export default function MissionDetail({ id, navigate }) {
     }
   };
 
+  // Initial fetch + 60s safety reload. Once the mission lands in a terminal
+  // state we stop the safety timer entirely — no more events are coming, and
+  // the user can hit refresh if they need to re-pull notes.
   useEffect(() => {
     terminalRef.current = false;
     load();
-    const interval = setInterval(() => {
+    const safety = setInterval(() => {
       if (terminalRef.current) {
-        clearInterval(interval);
+        clearInterval(safety);
         return;
       }
       load();
-    }, 4000);
-    return () => clearInterval(interval);
+    }, 60000);
+    return () => clearInterval(safety);
   }, [id]);
+
+  // SSE-driven refresh — only fires for events on THIS mission.
+  useFleetEvents((evt) => {
+    if (terminalRef.current) return;
+    if (String(evt.mission_id) !== String(id)) return;
+    if (!MISSION_STATE_EVENTS.has(evt.type)) return;
+    load();
+  });
 
   useEffect(() => {
     getSystemFeatures().then(features => {

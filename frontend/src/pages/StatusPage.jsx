@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { getStatusPage, listProjects, listServices, createService, deleteService, listIncidents, createIncident, updateIncident } from '../api/client';
+import { useFleetEvents } from '../hooks/useFleetEvents';
 
 const GROUP_ORDER = ['Core Services', 'AI & ML', 'Data Layer', 'Integrations', 'Observability', 'Frontend', 'Infrastructure', 'Default'];
 
@@ -218,16 +219,39 @@ export default function StatusPage({ navigate }) {
     listProjects().then(setProjects).catch(() => {});
   }, []);
 
+  // Initial fetch + 60s safety net. Real-time refreshes come from the
+  // `service_status_changed` event broadcast by backend/health_checker.py
+  // when a probe transitions up/degraded/down. Steady-state is silent.
   useEffect(() => {
     load();
-    const id = setInterval(load, 30000);
-    return () => clearInterval(id);
+    const safety = setInterval(load, 60000);
+    return () => clearInterval(safety);
   }, [selectedProject]);
 
+  // Wall-clock tick (not network — keep at 1s).
   useEffect(() => {
     const id = setInterval(() => setSecondsAgo(s => s + 1), 1000);
     return () => clearInterval(id);
   }, []);
+
+  // Debounced reload so a burst of transitions coalesces into one fetch.
+  const reloadTimer = useRef(null);
+  const scheduleReload = useCallback(() => {
+    if (reloadTimer.current) return;
+    reloadTimer.current = setTimeout(() => {
+      reloadTimer.current = null;
+      load();
+    }, 250);
+  }, []); // load closes over selectedProject — the effect above rebinds on change
+  useEffect(() => () => { if (reloadTimer.current) clearTimeout(reloadTimer.current); }, []);
+
+  useFleetEvents((evt) => {
+    if (evt.type !== 'service_status_changed') return;
+    // Project filter: if a project is selected, only refresh on events
+    // for services in that project.
+    if (selectedProject && evt.project_id && evt.project_id !== selectedProject) return;
+    scheduleReload();
+  });
 
   const handleCreateIncident = async (e) => {
     e.preventDefault();

@@ -4,12 +4,15 @@ from datetime import datetime, timezone, timedelta
 
 import httpx
 import db
+import fleet_bus
 
 log = logging.getLogger("devfleet.health_checker")
 
 _checker_task = None
 _client: httpx.AsyncClient | None = None
 _last_check: dict[str, datetime] = {}
+# Cached last-known status per service so we only broadcast on transition.
+_last_status: dict[str, str] = {}
 _prune_counter = 0
 
 
@@ -74,6 +77,7 @@ async def _check_loop():
 
 
 async def _check_service(svc: dict):
+    sid = svc["id"]
     timeout_s = (svc.get("timeout_ms") or 5000) / 1000
     try:
         resp = await _client.get(svc["url"], timeout=timeout_s)
@@ -87,12 +91,26 @@ async def _check_service(svc: dict):
         else:
             status = "down"
 
-        await _record_check(svc["id"], status, elapsed_ms, resp.status_code, "")
+        await _record_check(sid, status, elapsed_ms, resp.status_code, "")
         log.debug("Check %s: %s (%dms, HTTP %d)", svc["name"], status, elapsed_ms, resp.status_code)
 
     except Exception as e:
-        await _record_check(svc["id"], "down", None, None, str(e)[:500])
+        status = "down"
+        await _record_check(sid, status, None, None, str(e)[:500])
         log.debug("Check %s: down (%s)", svc["name"], str(e)[:100])
+
+    # Broadcast only on transition — quiet during steady-state, instant on change.
+    prev = _last_status.get(sid)
+    if prev != status:
+        _last_status[sid] = status
+        await fleet_bus.broadcast({
+            "type": "service_status_changed",
+            "service_id": sid,
+            "service_name": svc.get("name"),
+            "project_id": svc.get("project_id"),
+            "old_status": prev,
+            "new_status": status,
+        })
 
 
 async def _record_check(service_id: str, status: str, response_time_ms: int | None,
