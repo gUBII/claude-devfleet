@@ -47,7 +47,7 @@ export default function LiveAgent({ sessionId, navigate }) {
         }
         if (s.total_cost_usd) setFinalCost(s.total_cost_usd);
         if (s.total_tokens) setFinalTokens(s.total_tokens);
-        if (s.status !== 'running') {
+        if (s.status !== 'running' && s.status !== 'waiting_for_human') {
           setStatus(s.status);
           if (s.output_log) setEvents([{ type: 'text', text: s.output_log }]);
           return;

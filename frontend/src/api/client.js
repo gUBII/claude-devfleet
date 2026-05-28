@@ -113,6 +113,11 @@ export function streamSession(sessionId, { onEvent, onBackfill, onDone, onError 
       } else if (data.type === 'cost_update') {
         // Live heartbeat from backend (every ~60s mid-session)
         onEvent?.({ type: 'cost_update', cost: data.cost || 0, tokens: data.tokens || 0, raw: data });
+      } else {
+        // Forward any other event verbatim (hitl_question, hitl_answered,
+        // hitl_timeout_cancelled, and future types). A whitelist without a
+        // default silently drops events the backend adds later.
+        onEvent?.(data);
       }
     } catch (err) {
       console.error('SSE parse error:', err);
