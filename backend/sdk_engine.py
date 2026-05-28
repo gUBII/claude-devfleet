@@ -760,6 +760,7 @@ async def _run_agent(
             "mission_title": mission.get("title", ""),
             "session_id": session_id,
             "cost": total_cost,
+            "project_id": mission.get("project_id"),
         }))
         log.info("Session %s completed (cost $%.4f, tokens %d)", session_id, total_cost, total_tokens)
 
@@ -818,6 +819,7 @@ async def _run_agent(
                 "mission_title": mission.get("title", ""),
                 "session_id": session_id,
                 "reason": cancel_reason,
+                "project_id": mission.get("project_id"),
             }))
 
     except Exception as e:
@@ -906,6 +908,7 @@ async def _run_agent(
             "mission_title": mission.get("title", ""),
             "session_id": session_id,
             "failure_layer": failure_layer,
+            "project_id": mission.get("project_id"),
         }))
 
     finally:
@@ -937,9 +940,57 @@ async def dispatch_mission(
     last_report: dict | None,
     opts: DispatchOptions | None = None,
     github_token: str | None = None,
+    acting_user_id: str | None = None,
 ):
     """Spawn an agent via SDK to work on a mission."""
     from app import resolve_path
+    import auth as _auth
+
+    # ── Project-scope gate (v17) ──────────────────────────────────────────
+    # Single chokepoint for every dispatch path: the HTTP route, the mission
+    # watcher's auto_dispatch, and the autoloop all funnel through here. Resolve
+    # the acting user (explicit override, else the mission's creator) and refuse
+    # to spawn an agent in a project the user isn't bound to. A None actor (a
+    # system / legacy mission with no created_by_email) is treated as
+    # admin-equivalent and allowed.
+    _actor_id = acting_user_id
+    if _actor_id is None:
+        _email = (mission.get("created_by_email") or "").strip()
+        if _email:
+            _u = await _auth.get_user_by_email(_email)
+            _actor_id = _u["id"] if _u else None
+    _project_id = mission.get("project_id")
+    if _actor_id and _project_id and not await _auth.user_has_project_access(
+        _actor_id, _project_id
+    ):
+        log.warning(
+            "Dispatch denied: user %s not bound to project %s (mission %s)",
+            _actor_id, _project_id, mission.get("id"),
+        )
+        _conn = await db.get_db()
+        try:
+            await _conn.execute(
+                "UPDATE agent_sessions SET status='failed', "
+                "ended_at=datetime('now'), exit_code=-1, "
+                "error_log='scope_denied: user not bound to project' WHERE id=?",
+                (session_id,),
+            )
+            await _conn.execute(
+                "UPDATE missions SET status='failed' WHERE id=?",
+                (mission["id"],),
+            )
+            await _conn.commit()
+        finally:
+            await _conn.close()
+        await fleet_bus.broadcast({
+            "type": "mission_failed",
+            "mission_id": mission["id"],
+            "session_id": session_id,
+            "reason": "scope_denied",
+            "project_id": _project_id,
+            "failure_layer": "dispatch",
+        })
+        return
 
     full_prompt = build_prompt(mission, last_report)
     project_path = resolve_path(mission["project_path"])

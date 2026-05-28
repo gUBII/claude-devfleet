@@ -156,6 +156,7 @@ async def _dispatch_eligible(mission: dict):
         "mission_id": mission_id,
         "mission_title": mission.get("title", ""),
         "session_id": session_id,
+        "project_id": mission.get("project_id"),
     }))
 
     log.info("Auto-dispatching mission '%s' (session %s)", mission["title"], session_id)

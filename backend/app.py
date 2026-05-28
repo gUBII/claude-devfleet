@@ -20,7 +20,8 @@ from models import (ProjectCreate, ProjectUpdate, MissionCreate, MissionUpdate,
                     McpServerCreate, CeilingUpdate,
                     HitlAskRequest, HitlReply, ProjectChatRequest,
                     GitHubTokenSet, UserPermissionGrant, CHAT_PERMISSIONS,
-                    ChangePasswordRequest, LaneCreate, LaneUpdate)
+                    ChangePasswordRequest, LaneCreate, LaneUpdate,
+                    ProjectAccessGrant)
 import health_checker
 import mission_watcher
 import scheduler
@@ -527,6 +528,7 @@ async def auth_invite(request: Request):
 
 
 @app.get("/api/auth/users")
+@app.get("/api/admin/users")
 async def auth_list_users(request: Request):
     user = getattr(request.state, "user", None)
     if not user or user.get("role") != "admin":
@@ -534,7 +536,21 @@ async def auth_list_users(request: Request):
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall(
-            "SELECT id, email, role, created_at, last_login_at FROM users ORDER BY created_at"
+            "SELECT u.id, u.email, u.role, u.created_at, u.last_login_at, "
+            "  (SELECT COUNT(*) FROM user_project_access WHERE user_id=u.id) "
+            "    AS bound_project_count, "
+            "  (SELECT COUNT(*) FROM agent_sessions s "
+            "     JOIN missions m ON m.id = s.mission_id "
+            "     WHERE s.status='running' AND m.created_by_email = u.email) "
+            "    AS running_agents, "
+            "  (SELECT COALESCE(SUM(s.total_cost_usd), 0) FROM agent_sessions s "
+            "     JOIN missions m ON m.id = s.mission_id "
+            "     WHERE m.created_by_email = u.email "
+            "       AND s.started_at >= datetime('now','-1 day')) AS cost_today_usd, "
+            "  (SELECT COUNT(*) FROM missions "
+            "     WHERE created_by_email = u.email AND status='completed') "
+            "    AS missions_completed "
+            "FROM users u ORDER BY u.created_at"
         )
         return [dict(r) for r in rows]
     finally:
@@ -604,7 +620,7 @@ async def fleet_events_stream(request: Request):
     user = getattr(request.state, "user", None)
     if not user:
         raise HTTPException(401, "Authentication required")
-    q = fleet_bus.subscribe()
+    q = fleet_bus.subscribe(user["sub"])
 
     async def event_stream():
         try:
@@ -649,6 +665,13 @@ async def hitl_ask(sid: str, body: HitlAskRequest, request: Request):
             (sid,),
         )
         await conn.commit()
+        # Resolve the owning project so the fleet-wide toast (which carries the
+        # question text) only reaches users bound to that project.
+        _pr = await conn.execute_fetchall(
+            "SELECT m.project_id FROM agent_sessions s JOIN missions m ON m.id=s.mission_id WHERE s.id=?",
+            (sid,),
+        )
+        _hitl_project_id = dict(_pr[0])["project_id"] if _pr else None
     finally:
         await conn.close()
 
@@ -663,6 +686,7 @@ async def hitl_ask(sid: str, body: HitlAskRequest, request: Request):
         "type": "hitl_question",
         "session_id": sid,
         "question": body.question,
+        "project_id": _hitl_project_id,
     })
 
     fut = hitl_state.create(sid)
@@ -708,6 +732,7 @@ async def hitl_ask(sid: str, body: HitlAskRequest, request: Request):
             "type": "mission_cancelled_no_approval",
             "session_id": sid,
             "question": body.question,
+            "project_id": _hitl_project_id,
         })
         # 408 Request Timeout — surfaces a clear failure to the MCP caller so
         # the agent's tool-call returns an explicit "no answer" signal, not a
@@ -1104,6 +1129,91 @@ async def admin_revoke_user_permission(uid: str, perm: str, request: Request):
     return None
 
 
+# ──────────────────────────────────────────────
+# Admin — per-user project-scope bindings + activity
+# ──────────────────────────────────────────────
+
+
+@app.get("/api/admin/users/{uid}/projects")
+async def admin_list_user_projects(uid: str, request: Request):
+    user = getattr(request.state, "user", None)
+    if not user or user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    import auth
+    bindings = await auth.list_user_project_bindings(uid)
+    return {"user_id": uid, "bindings": bindings}
+
+
+@app.put("/api/admin/users/{uid}/projects/{pid}", status_code=201)
+async def admin_grant_project_access(uid: str, pid: str, request: Request):
+    user = getattr(request.state, "user", None)
+    if not user or user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    conn = await db.get_db()
+    try:
+        urows = await conn.execute_fetchall("SELECT id FROM users WHERE id=?", (uid,))
+        prows = await conn.execute_fetchall("SELECT id FROM projects WHERE id=?", (pid,))
+    finally:
+        await conn.close()
+    if not urows:
+        raise HTTPException(404, "User not found")
+    if not prows:
+        raise HTTPException(404, "Project not found")
+    import auth
+    await auth.grant_project_access(uid, pid, user["sub"])
+    return {"ok": True, "user_id": uid, "project_id": pid}
+
+
+@app.delete("/api/admin/users/{uid}/projects/{pid}", status_code=204)
+async def admin_revoke_project_access(uid: str, pid: str, request: Request):
+    user = getattr(request.state, "user", None)
+    if not user or user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    import auth
+    await auth.revoke_project_access(uid, pid)
+    return None
+
+
+@app.get("/api/admin/users/{uid}/activity")
+async def admin_user_activity(uid: str, request: Request):
+    user = getattr(request.state, "user", None)
+    if not user or user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    conn = await db.get_db()
+    try:
+        urows = await conn.execute_fetchall("SELECT email FROM users WHERE id=?", (uid,))
+        if not urows:
+            raise HTTPException(404, "User not found")
+        email = dict(urows[0])["email"]
+        stats = await conn.execute_fetchall(
+            "SELECT "
+            "  (SELECT COUNT(*) FROM missions WHERE created_by_email=?) AS total, "
+            "  (SELECT COUNT(*) FROM missions WHERE created_by_email=? AND status='running') AS running, "
+            "  (SELECT COUNT(*) FROM missions WHERE created_by_email=? AND status='completed') AS completed, "
+            "  (SELECT COUNT(*) FROM missions WHERE created_by_email=? AND status='failed') AS failed, "
+            "  (SELECT COALESCE(SUM(s.total_cost_usd),0) FROM agent_sessions s "
+            "     JOIN missions m ON m.id=s.mission_id WHERE m.created_by_email=?) AS total_cost_usd, "
+            "  (SELECT COALESCE(SUM(s.total_tokens),0) FROM agent_sessions s "
+            "     JOIN missions m ON m.id=s.mission_id WHERE m.created_by_email=?) AS total_tokens",
+            (email, email, email, email, email, email),
+        )
+        recent = await conn.execute_fetchall(
+            "SELECT s.id AS session_id, s.status, s.started_at, s.total_cost_usd, "
+            "       m.id AS mission_id, m.title, m.project_id "
+            "FROM agent_sessions s JOIN missions m ON m.id = s.mission_id "
+            "WHERE m.created_by_email=? ORDER BY s.started_at DESC LIMIT 20",
+            (email,),
+        )
+        return {
+            "user_id": uid,
+            "email": email,
+            "stats": dict(stats[0]) if stats else {},
+            "recent_sessions": [dict(r) for r in recent],
+        }
+    finally:
+        await conn.close()
+
+
 @app.get("/api/projects/{pid}/chat/actions")
 async def list_project_chat_actions(
     pid: str, request: Request, limit: int = Query(100, ge=1, le=500)
@@ -1155,23 +1265,94 @@ async def compact_project_chat_now(pid: str, request: Request):
 
 
 # ──────────────────────────────────────────────
+# Project-scope access gates (v17)
+# ──────────────────────────────────────────────
+# Browser callers always send a JWT (frontend api/client.js). The stdio MCP
+# servers (mcp_context, mcp_devfleet) call a subset of these endpoints
+# UNAUTHENTICATED from localhost — they are trusted internal callers, the same
+# boundary used by the HITL endpoint. So single-resource GETs and the missions
+# list grant a localhost bypass; the aggregate `list_projects` (browser-only,
+# never hit by MCP) requires a real authenticated user.
+
+
+def _is_localhost(request: Request) -> bool:
+    host = request.client.host if request.client else ""
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
+async def _scope_project_ids(request: Request, *, allow_localhost: bool) -> list[str] | None:
+    """Resolve the project-id filter for the calling user.
+
+    Returns None when no filter applies (admin, or a trusted unauthenticated
+    localhost internal call). Returns the list of allowed project ids for an
+    authenticated non-admin (possibly empty). Raises 401 when unauthenticated
+    and not an allowed localhost caller.
+    """
+    user = getattr(request.state, "user", None)
+    if not user:
+        if allow_localhost and _is_localhost(request):
+            return None
+        raise HTTPException(401, "Authentication required")
+    import auth
+    return await auth.list_accessible_project_ids(user["sub"])
+
+
+async def _enforce_project_access(
+    request: Request,
+    project_id: str,
+    *,
+    allow_localhost: bool,
+    not_found_msg: str = "Project not found",
+) -> None:
+    """Gate a single-resource read/mutation. Returns 404 (not 403) on unbound
+    access so resource existence is not leaked. Trusted localhost internal
+    calls bypass the check."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        if allow_localhost and _is_localhost(request):
+            return
+        raise HTTPException(401, "Authentication required")
+    import auth
+    if not await auth.user_has_project_access(user["sub"], project_id):
+        raise HTTPException(404, not_found_msg)
+
+
+# ──────────────────────────────────────────────
 # Projects
 # ──────────────────────────────────────────────
 
 @app.get("/api/projects")
-async def list_projects():
+async def list_projects(request: Request):
+    allowed = await _scope_project_ids(request, allow_localhost=False)
     conn = await db.get_db()
     try:
-        rows = await conn.execute_fetchall(
-            """SELECT p.*,
-                      COUNT(m.id) AS mission_count,
-                      SUM(CASE WHEN m.status='running' THEN 1 ELSE 0 END) AS running_count,
-                      SUM(CASE WHEN m.status='completed' THEN 1 ELSE 0 END) AS completed_count
-               FROM projects p
-               LEFT JOIN missions m ON m.project_id = p.id
-               GROUP BY p.id
-               ORDER BY p.created_at DESC"""
-        )
+        if allowed is None:
+            rows = await conn.execute_fetchall(
+                """SELECT p.*,
+                          COUNT(m.id) AS mission_count,
+                          SUM(CASE WHEN m.status='running' THEN 1 ELSE 0 END) AS running_count,
+                          SUM(CASE WHEN m.status='completed' THEN 1 ELSE 0 END) AS completed_count
+                   FROM projects p
+                   LEFT JOIN missions m ON m.project_id = p.id
+                   GROUP BY p.id
+                   ORDER BY p.created_at DESC"""
+            )
+        elif not allowed:
+            return []
+        else:
+            placeholders = ",".join("?" for _ in allowed)
+            rows = await conn.execute_fetchall(
+                f"""SELECT p.*,
+                           COUNT(m.id) AS mission_count,
+                           SUM(CASE WHEN m.status='running' THEN 1 ELSE 0 END) AS running_count,
+                           SUM(CASE WHEN m.status='completed' THEN 1 ELSE 0 END) AS completed_count
+                    FROM projects p
+                    LEFT JOIN missions m ON m.project_id = p.id
+                    WHERE p.id IN ({placeholders})
+                    GROUP BY p.id
+                    ORDER BY p.created_at DESC""",
+                tuple(allowed),
+            )
         return [dict(r) for r in rows]
     finally:
         await conn.close()
@@ -1198,7 +1379,8 @@ async def create_project(body: ProjectCreate):
 
 
 @app.get("/api/projects/{pid}")
-async def get_project(pid: str):
+async def get_project(pid: str, request: Request):
+    await _enforce_project_access(request, pid, allow_localhost=True)
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall("SELECT * FROM projects WHERE id=?", (pid,))
@@ -1220,7 +1402,8 @@ async def get_project(pid: str):
 
 
 @app.put("/api/projects/{pid}")
-async def update_project(pid: str, body: ProjectUpdate):
+async def update_project(pid: str, body: ProjectUpdate, request: Request):
+    await _enforce_project_access(request, pid, allow_localhost=False)
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall("SELECT * FROM projects WHERE id=?", (pid,))
@@ -1242,7 +1425,8 @@ async def update_project(pid: str, body: ProjectUpdate):
 
 
 @app.delete("/api/projects/{pid}", status_code=204)
-async def delete_project(pid: str):
+async def delete_project(pid: str, request: Request):
+    await _enforce_project_access(request, pid, allow_localhost=False)
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall("SELECT * FROM projects WHERE id=?", (pid,))
@@ -1260,6 +1444,7 @@ async def delete_project(pid: str):
 
 @app.get("/api/missions")
 async def list_missions(
+    request: Request,
     response: Response,
     project_id: str = Query(None),
     status: str = Query(None),
@@ -1269,12 +1454,21 @@ async def list_missions(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
+    allowed = await _scope_project_ids(request, allow_localhost=True)
+    if allowed is not None and not allowed:
+        response.headers["X-Total-Count"] = "0"
+        return []
     conn = await db.get_db()
     try:
         base = """FROM missions m
                   JOIN projects p ON p.id = m.project_id
                   WHERE 1=1"""
         params: list = []
+        # Restrict non-admin callers to their bound projects (None = no filter).
+        if allowed is not None:
+            ph = ",".join("?" for _ in allowed)
+            base += f" AND m.project_id IN ({ph})"
+            params.extend(allowed)
         # Hide synthetic chat-turn missions by default — they belong to the
         # chat surface, not the operator mission board. Opt back in with
         # `?include_chat_turns=true` (used by audit/debugging tooling).
@@ -1362,7 +1556,7 @@ async def create_mission(request: Request, body: MissionCreate):
 
 
 @app.get("/api/missions/{mid}")
-async def get_mission(mid: str):
+async def get_mission(mid: str, request: Request):
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall(
@@ -1372,6 +1566,10 @@ async def get_mission(mid: str):
         if not rows:
             raise HTTPException(404, "Mission not found")
         mission = dict(rows[0])
+        await _enforce_project_access(
+            request, mission["project_id"], allow_localhost=True,
+            not_found_msg="Mission not found",
+        )
 
         sessions = await conn.execute_fetchall(
             "SELECT * FROM agent_sessions WHERE mission_id=? ORDER BY started_at DESC",
@@ -1416,12 +1614,16 @@ async def list_children(mid: str):
 
 
 @app.put("/api/missions/{mid}")
-async def update_mission(mid: str, body: MissionUpdate):
+async def update_mission(mid: str, body: MissionUpdate, request: Request):
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall("SELECT * FROM missions WHERE id=?", (mid,))
         if not rows:
             raise HTTPException(404, "Mission not found")
+        await _enforce_project_access(
+            request, dict(rows[0])["project_id"], allow_localhost=False,
+            not_found_msg="Mission not found",
+        )
         updates = body.model_dump(exclude_none=True)
         if not updates:
             return dict(rows[0])
@@ -1450,12 +1652,16 @@ async def update_mission(mid: str, body: MissionUpdate):
 
 
 @app.delete("/api/missions/{mid}", status_code=204)
-async def delete_mission(mid: str):
+async def delete_mission(mid: str, request: Request):
     conn = await db.get_db()
     try:
-        rows = await conn.execute_fetchall("SELECT status FROM missions WHERE id=?", (mid,))
+        rows = await conn.execute_fetchall("SELECT status, project_id FROM missions WHERE id=?", (mid,))
         if not rows:
             raise HTTPException(404, "Mission not found")
+        await _enforce_project_access(
+            request, dict(rows[0])["project_id"], allow_localhost=False,
+            not_found_msg="Mission not found",
+        )
         if dict(rows[0])["status"] == "running":
             raise HTTPException(400, "Cannot delete a running mission — cancel it first")
         await conn.execute("DELETE FROM missions WHERE id=?", (mid,))
@@ -1827,7 +2033,11 @@ async def dispatch(request: Request, mid: str, body: DispatchOptions | None = No
             _github_token = _gh_result[0]  # tuple: (token, github_username)
 
     task = asyncio.create_task(
-        dispatch_mission(session_id, mission, last_report, opts=body, github_token=_github_token)
+        dispatch_mission(
+            session_id, mission, last_report, opts=body,
+            github_token=_github_token,
+            acting_user_id=_dispatch_user.get("sub") if _dispatch_user else None,
+        )
     )
     running_tasks[session_id] = task
     asyncio.create_task(fleet_bus.broadcast({
@@ -1835,6 +2045,7 @@ async def dispatch(request: Request, mid: str, body: DispatchOptions | None = No
         "mission_id": mission["id"],
         "mission_title": mission.get("title", ""),
         "session_id": session_id,
+        "project_id": mission.get("project_id"),
     }))
 
     return {"session_id": session_id, "status": "running", "model": model_used}
@@ -1894,6 +2105,7 @@ async def resume(mid: str, body: DispatchOptions | None = None):
         "mission_id": mid,
         "mission_title": mission.get("title", ""),
         "session_id": session_id,
+        "project_id": mission.get("project_id"),
     }))
 
     return {"session_id": session_id, "status": "running", "resumed": True}

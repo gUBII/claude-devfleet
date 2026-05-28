@@ -183,6 +183,98 @@ async def list_permissions(user_id: str) -> list[str]:
         await conn.close()
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Project-scope bindings — which folders/projects a non-admin user may see and
+# dispatch into. Admins are implicitly bound to every project (mirrors the
+# has_permission admin short-circuit above).
+# ──────────────────────────────────────────────────────────────────────────
+
+
+async def user_has_project_access(user_id: str, project_id: str) -> bool:
+    """Admin → always True. Non-admin → row must exist in user_project_access."""
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT role FROM users WHERE id=?", (user_id,)
+        )
+        if rows and dict(rows[0]).get("role") == "admin":
+            return True
+        rows = await conn.execute_fetchall(
+            "SELECT 1 FROM user_project_access WHERE user_id=? AND project_id=?",
+            (user_id, project_id),
+        )
+        return bool(rows)
+    finally:
+        await conn.close()
+
+
+async def list_accessible_project_ids(user_id: str) -> list[str] | None:
+    """Return None for admins (sentinel: caller must NOT filter). For non-admins
+    return the explicit list of bound project IDs (possibly empty)."""
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT role FROM users WHERE id=?", (user_id,)
+        )
+        if rows and dict(rows[0]).get("role") == "admin":
+            return None
+        rows = await conn.execute_fetchall(
+            "SELECT project_id FROM user_project_access WHERE user_id=? "
+            "ORDER BY granted_at",
+            (user_id,),
+        )
+        return [dict(r)["project_id"] for r in rows]
+    finally:
+        await conn.close()
+
+
+async def grant_project_access(
+    user_id: str, project_id: str, granted_by: str
+) -> None:
+    """Idempotently bind a user to a project."""
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            "INSERT OR IGNORE INTO user_project_access "
+            "(user_id, project_id, granted_by) VALUES (?, ?, ?)",
+            (user_id, project_id, granted_by),
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def revoke_project_access(user_id: str, project_id: str) -> None:
+    """Revoke a binding. Idempotent — revoking an absent binding is a no-op."""
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            "DELETE FROM user_project_access WHERE user_id=? AND project_id=?",
+            (user_id, project_id),
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def list_user_project_bindings(user_id: str) -> list[dict]:
+    """Return [{project_id, project_name, project_path, granted_at, granted_by}]
+    for the user's bound projects, newest grant first."""
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT upa.project_id, p.name AS project_name, p.path AS project_path, "
+            "upa.granted_at, upa.granted_by "
+            "FROM user_project_access upa "
+            "JOIN projects p ON p.id = upa.project_id "
+            "WHERE upa.user_id=? ORDER BY upa.granted_at DESC",
+            (user_id,),
+        )
+        return [dict(r) for r in rows]
+    finally:
+        await conn.close()
+
+
 async def set_github_token(
     user_id: str, token: str, github_username: str = ""
 ) -> None:

@@ -636,6 +636,10 @@ class UserPermissionGrant(BaseModel):
         return self.permission in CHAT_PERMISSIONS
 
 
+class ProjectAccessGrant(BaseModel):
+    project_id: str
+
+
 class ChatActionConfirm(BaseModel):
     decision: Literal["approve", "deny"]
 

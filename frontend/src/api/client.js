@@ -275,6 +275,15 @@ export const getMe = () => request('/auth/me');
 export const createInvite = () => request('/auth/invite', { method: 'POST' });
 export const listUsers = () => request('/auth/users');
 
+// ── Admin — per-user project-scope bindings + activity ────────────────────────
+export const adminListUsers = () => request('/admin/users');
+export const adminListUserProjects = (uid) => request(`/admin/users/${uid}/projects`);
+export const adminGrantProjectAccess = (uid, pid) =>
+  request(`/admin/users/${uid}/projects/${pid}`, { method: 'PUT' });
+export const adminRevokeProjectAccess = (uid, pid) =>
+  request(`/admin/users/${uid}/projects/${pid}`, { method: 'DELETE' });
+export const adminGetUserActivity = (uid) => request(`/admin/users/${uid}/activity`);
+
 // ── HITL ─────────────────────────────────────────────────────────────────────
 export const hitlReply = (sessionId, reply) =>
   request(`/sessions/${sessionId}/hitl-reply`, { method: 'POST', body: JSON.stringify({ reply }) });

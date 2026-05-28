@@ -364,6 +364,24 @@ async def init_db():
             # so the coder lane skips the REV-/TEST- sub-mission spawn step
             # and proceeds directly to submit_report.
             "ALTER TABLE missions ADD COLUMN skip_quality_gates INTEGER DEFAULT 0",
+            # v17: per-user project-scope bindings. Non-admin users only see and
+            # dispatch into projects bound here; admins are implicitly bound to
+            # all (enforced in auth.user_has_project_access). Grandfather seed
+            # below grants every existing non-admin access to every existing
+            # project so the rollout doesn't strip current users; new projects
+            # default-deny until an admin grants.
+            "CREATE TABLE IF NOT EXISTS user_project_access ("
+            "user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, "
+            "project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, "
+            "granted_by TEXT, "
+            "granted_at TEXT DEFAULT (datetime('now')), "
+            "PRIMARY KEY (user_id, project_id))",
+            "CREATE INDEX IF NOT EXISTS idx_upa_user ON user_project_access(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_upa_project ON user_project_access(project_id)",
+            # Grandfather seed — idempotent via PRIMARY KEY conflict on re-run.
+            "INSERT OR IGNORE INTO user_project_access (user_id, project_id, granted_by) "
+            "SELECT u.id, p.id, 'system-seed-v17' FROM users u CROSS JOIN projects p "
+            "WHERE u.role != 'admin'",
         ]
         for migration in migrations:
             try:
