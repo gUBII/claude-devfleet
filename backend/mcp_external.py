@@ -34,8 +34,10 @@ server = Server("devfleet")
 # {"error": str(e)} so MCP clients can branch on a stable `code` and back off
 # on `retry_after_ms`. Codes: INVALID_PARAMS, RATE_LIMITED, INTERNAL,
 # SCOPE_DENIED. Successful results stay the raw handler dict (back-compat), and
-# the domain errors handlers return on purpose ({"error": ...}, {"state": ...})
-# are unchanged — only the exception path is wrapped here.
+# the legacy domain errors handlers return on purpose ({"error": ...},
+# {"state": ...}) are unchanged. The envelope is produced in two places: the
+# call_tool exception path (via _classify_exception) and the scope gate
+# (_enforce_scope, which returns a SCOPE_DENIED envelope directly).
 
 def _error_envelope(code: str, message: str, retry_after_ms: int | None = None) -> dict:
     return {
@@ -51,6 +53,55 @@ def _classify_exception(exc: Exception) -> dict:
     if isinstance(exc, (ValueError, TypeError)):
         return _error_envelope("INVALID_PARAMS", str(exc))
     return _error_envelope("INTERNAL", str(exc))
+
+
+async def _enforce_scope(tool: str, args: dict, project_id: str | None) -> dict | None:
+    """Project-scope gate for the mutating MCP tools (Task 11).
+
+    Resolve the acting user from `acting_user_email` (or the legacy
+    `created_by_email`) and refuse the call when that user is not bound to
+    `project_id`. Returns a SCOPE_DENIED envelope to hand straight back to the
+    caller, or None when the call is allowed. Never raises — MCP handlers return
+    JSON dicts, and a raise would collapse to the generic INTERNAL envelope.
+
+    The trust model here differs from the sdk_engine dispatch gate, so the
+    fallback rules differ too:
+      - Missing email → admin-equivalent fallback + one deprecation log. This is
+        back-compat for callers that pre-date scope bindings; Phase II will
+        require the email and drop the fallback.
+      - Unknown email → DENIED. `acting_user_email` at this boundary is arbitrary
+        caller-supplied input; an explicit-but-unresolvable email must not be
+        silently upgraded to admin (a typo'd email getting admin access would be
+        a real privilege escalation).
+    """
+    acting_email = (
+        args.get("acting_user_email") or args.get("created_by_email") or ""
+    ).strip()
+    if not acting_email:
+        log.warning(
+            "MCP external '%s' called without acting_user_email — admin-equivalent "
+            "fallback. Set acting_user_email to enable scope enforcement.",
+            tool,
+        )
+        return None
+
+    import auth as _auth
+
+    user = await _auth.get_user_by_email(acting_email)
+    if user is None:
+        log.warning("MCP external '%s' denied: unknown user %s", tool, acting_email)
+        return _error_envelope("SCOPE_DENIED", f"Unknown DevFleet user: {acting_email}")
+
+    if project_id and not await _auth.user_has_project_access(user["id"], project_id):
+        log.warning(
+            "MCP external '%s' denied: %s not bound to project %s",
+            tool, acting_email, project_id,
+        )
+        return _error_envelope(
+            "SCOPE_DENIED",
+            f"{acting_email} is not bound to project {project_id}",
+        )
+    return None
 
 
 # Clients MUST send a fresh JSON-RPC `id` per request within a session.
@@ -192,6 +243,15 @@ TOOLS = [
                 "mission_id": {"type": "string", "description": "ID of the mission to dispatch"},
                 "model": {"type": "string", "description": "Override model for this dispatch"},
                 "max_turns": {"type": "integer", "description": "Max conversation turns"},
+                "acting_user_email": {
+                    "type": "string",
+                    "description": (
+                        "Your DevFleet account email. Scope-checked against the "
+                        "mission's project — dispatch is denied (SCOPE_DENIED) if you "
+                        "are not bound to that project. Omit only for trusted "
+                        "system/admin callers (admin-equivalent fallback)."
+                    ),
+                },
             },
             "required": ["mission_id"],
         },
@@ -254,6 +314,14 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "mission_id": {"type": "string", "description": "Mission ID to cancel"},
+                "acting_user_email": {
+                    "type": "string",
+                    "description": (
+                        "Your DevFleet account email. Scope-checked against the "
+                        "mission's project — cancel is denied (SCOPE_DENIED) if you "
+                        "are not bound to that project."
+                    ),
+                },
             },
             "required": ["mission_id"],
         },
@@ -450,6 +518,10 @@ async def _create_mission(args: dict, conn) -> dict:
     if not await row.fetchone():
         return {"error": f"Project {args['project_id']} not found"}
 
+    denied = await _enforce_scope("create_mission", args, args["project_id"])
+    if denied:
+        return denied
+
     # Get next mission number
     cur = await conn.execute(
         "SELECT COALESCE(MAX(mission_number), 0) + 1 FROM missions WHERE project_id = ?",
@@ -525,6 +597,13 @@ async def _dispatch_mission(args: dict, conn) -> dict:
         return {"error": f"Mission {mid} not found"}
 
     mission = dict(mission)
+
+    # Scope gate before any side-effects (session row, status flip) so an unbound
+    # caller fails fast and leaves no half-dispatched state behind.
+    denied = await _enforce_scope("dispatch_mission", args, mission.get("project_id"))
+    if denied:
+        return denied
+
     if mission["status"] == "running":
         return {"error": "Mission is already running"}
 
@@ -758,6 +837,16 @@ async def _list_missions(args: dict, conn) -> dict:
 
 async def _cancel_mission(args: dict, conn) -> dict:
     mid = args["mission_id"]
+
+    # Resolve the mission's project for the scope gate (and to 404 cleanly).
+    cur = await conn.execute("SELECT project_id FROM missions WHERE id = ?", (mid,))
+    mission_row = await cur.fetchone()
+    if not mission_row:
+        return {"error": f"Mission {mid} not found"}
+
+    denied = await _enforce_scope("cancel_mission", args, dict(mission_row)["project_id"])
+    if denied:
+        return denied
 
     # Find running session. The SDK engine runs in-process and has no OS pid to track,
     # so we identify the session by id alone and rely on sdk_engine.cancel_session for
