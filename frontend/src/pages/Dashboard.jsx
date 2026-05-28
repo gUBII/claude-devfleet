@@ -1,6 +1,8 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { listLanes, listMissions, listSessions, getDashboardStats, getLanesStudioSummary, getSystemStatus } from '../api/client';
+import { useFleetEvents } from '../hooks/useFleetEvents';
 import TunnelStatus from '../components/TunnelStatus';
+import BrandMark from '../components/BrandMark';
 
 const _API_BASE = (import.meta.env.VITE_API_URL || '') + '/api';
 
@@ -24,16 +26,25 @@ function fmt(n) {
   return `$${n.toFixed(4)}`;
 }
 
+// RAG palette + neutral for inactive/drafted states. Status colors are the
+// only chromatic tokens on the workstation — everything else stays neutral.
 const STATUS_COLOR = {
-  completed: '#3fb950', running: '#f0a84b', failed: '#f85149',
-  interrupted: '#bc8cff', draft: '#8b949e', cancelled: '#8b949e',
+  completed:   'var(--rag-g)',
+  running:     'var(--rag-a)',
+  failed:      'var(--rag-r)',
+  interrupted: 'var(--rag-r)',
+  draft:       'var(--text-muted)',
+  cancelled:   'var(--text-muted)',
 };
 
-const LANE_ICON = {
-  orchestrator: '🧠', coder: '🛠', reviewer: '🔍', security: '🔒',
-  tester: '🧪', e2e: '🌐', qa: '✅', dynamic_tester: '⚡',
-  researcher: '🔬', explorer: '🔭',
-};
+// 2-letter mono tags — replace the prior emojis. Industrial, monospaced,
+// renders the same at every zoom level. Derived deterministically from the
+// lane key so new lanes work without a lookup table edit.
+function laneTag(name) {
+  const k = (name || '?').toLowerCase().replace(/[^a-z]/g, '');
+  if (k.length >= 2) return (k[0] + k[k.length - 1]).toUpperCase();
+  return k.toUpperCase().padEnd(2, '·');
+}
 
 export default function Dashboard({ navigate }) {
   const [summary, setSummary]       = useState(null);
@@ -73,7 +84,62 @@ export default function Dashboard({ navigate }) {
     }
   }, []);
 
-  useEffect(() => { tick(); load(); const i = setInterval(load, 5000); const t = setInterval(tick, 30000); return () => { clearInterval(i); clearInterval(t); }; }, [load]);
+  // Initial hydrate + wall-clock tick. The dashboard refreshes on SSE
+  // state-change events; with --workers 1, fleet_bus is authoritative and
+  // no safety-net poll is needed.
+  useEffect(() => {
+    tick();
+    load();
+    const clockTimer = setInterval(tick, 30000);
+    return () => clearInterval(clockTimer);
+  }, [load]);
+
+  // Debounced reload — multiple events arriving within 250ms coalesce into a
+  // single fetch so a burst (e.g. several missions dispatching at once) does
+  // not hammer the backend.
+  const reloadTimer = useRef(null);
+  const scheduleReload = useCallback(() => {
+    if (reloadTimer.current) return;
+    reloadTimer.current = setTimeout(() => {
+      reloadTimer.current = null;
+      load();
+    }, 250);
+  }, [load]);
+  useEffect(() => () => { if (reloadTimer.current) clearTimeout(reloadTimer.current); }, []);
+
+  useFleetEvents((evt) => {
+    switch (evt.type) {
+      case 'mission_dispatched':
+      case 'mission_completed':
+      case 'mission_failed':
+      case 'mission_cancelled':
+      case 'mission_cancelled_no_approval':
+      case 'hitl_question':
+        scheduleReload();
+        break;
+      default:
+        // connected | ping | unknown — no refresh needed.
+        break;
+    }
+  });
+
+  // Workstation keyboard shortcuts — only fire when no input/textarea has focus.
+  useEffect(() => {
+    const SHORTCUTS = {
+      p: 'projects',     m: 'missions',      f: 'fleet-config',
+      s: 'prompt-studio', r: 'reports',     i: 'integrations',
+      h: 'status',
+    };
+    function onKey(e) {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const tag = (e.target.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+      const dest = SHORTCUTS[e.key.toLowerCase()];
+      if (dest) { e.preventDefault(); navigate(dest); }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [navigate]);
 
   if (error) return (
     <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-secondary)' }}>
@@ -96,38 +162,60 @@ export default function Dashboard({ navigate }) {
   const costTotal = sessions.reduce((s, x) => s + (x.total_cost_usd || 0), 0);
   const activeLanes = lanes.filter(l => l.running > 0);
 
-  return (
-    <div className="dashboard-page">
+  const fleetRag = summary.running_agents === 0 ? 'g'
+                 : summary.free_slots === 0    ? 'r' : 'a';
+  const fleetRagLabel = fleetRag === 'g' ? 'IDLE · ALL SYSTEMS GREEN'
+                     : fleetRag === 'r' ? 'AT CAPACITY · QUEUE LIVE'
+                                        : `${summary.running_agents} RUNNING · ${summary.free_slots} FREE`;
 
-      {/* ── Hero ── */}
-      <div className="dash-hero">
-        <div className="dash-hero-bg" />
-        <div className="dash-hero-content">
-          <div className="dash-eyebrow">Nexis365 DevFleet™</div>
-          <h1 className="dash-title">Mission Control</h1>
-          <div className="dash-clock">{clock}</div>
-          <div className="dash-pills">
-            <span className="dash-pill"><b>{summary.total_slots}</b> slots</span>
-            <span className="dash-pill-sep">·</span>
-            <span className="dash-pill"><b>10</b> lanes</span>
-            <span className="dash-pill-sep">·</span>
-            <span className="dash-pill" style={{ color: summary.running_agents > 0 ? '#f0a84b' : undefined }}>
-              <b>{summary.running_agents}</b> active
+  return (
+    <div className="dashboard-page ws">
+
+      {/* ── Workstation toolbar — distinct CTAs ── */}
+      <div className="ws-toolbar">
+        <div className="ws-crumb">
+          <b>WORKSTATION</b>
+          <span className="ws-sep">/</span>
+          <span>FLEET-01</span>
+          <span className="ws-sep">/</span>
+          <span>MISSION CONTROL</span>
+          <span className={`ws-pill ws-pill--${fleetRag}`}>● {fleetRagLabel}</span>
+        </div>
+        <div className="ws-actions">
+          <button className="ws-btn"            onClick={() => navigate('reports')}>REPORTS</button>
+          <button className="ws-btn"            onClick={() => navigate('fleet-config')}>FLEET CONFIG</button>
+          <button className="ws-btn"            onClick={() => navigate('prompt-studio')}>PROMPT STUDIO</button>
+          <button className="ws-btn ws-btn--primary" onClick={() => navigate('missions')}>OPEN MISSION BOARD</button>
+        </div>
+      </div>
+
+      {/* ── Workstation heading — fluid type, no decorative gradient ── */}
+      <div className="ws-heading">
+        <div>
+          <div className="ws-pre">FLEET STATE · {new Date().toISOString().slice(0,10)}</div>
+          <h1 className="ws-h1">
+            FLEET{' '}
+            <span className={`ws-h1-accent ws-h1-accent--${fleetRag}`}>
+              {fleetRag === 'g' ? 'IDLE.' : fleetRag === 'r' ? 'AT CAPACITY.' : 'RUNNING.'}
             </span>
-            <span className="dash-pill-sep">·</span>
-            <span className="dash-pill"><b>{fmt(costTotal)}</b> total spend</span>
-            {tunnel && (
-              <>
-                <span className="dash-pill-sep">·</span>
-                <span className="dash-pill" style={{ color: tunnel.connected ? '#3fb950' : '#f85149' }}>
-                  <span style={{ marginRight: 4 }}>{tunnel.connected ? '⬤' : '○'}</span>
-                  {tunnel.connected
-                    ? <a href={tunnel.url} target="_blank" rel="noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}>tunnel live</a>
-                    : 'tunnel down'}
-                </span>
-              </>
-            )}
-          </div>
+            <br/>
+            <span className="ws-h1-dim">
+              {summary.running_agents} OF {summary.total_slots} SLOTS LIVE.
+            </span>
+          </h1>
+        </div>
+        <div className="ws-corner">
+          <div>{clock}</div>
+          <div>SPEND TODAY · <b>{fmt(summary.cost_today_usd)}</b></div>
+          <div>TOTAL SPEND · <b>{fmt(costTotal)}</b></div>
+          {tunnel && (
+            <div>
+              TUNNEL ·{' '}
+              <span className={tunnel.connected ? 'ws-ok' : 'ws-err'}>
+                ● {tunnel.connected ? 'LIVE' : 'DOWN'}
+              </span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -143,18 +231,23 @@ export default function Dashboard({ navigate }) {
         </div>
       )}
 
-      {/* ── Stat row ── */}
+      {/* ── KPI strip — RAG/neutral only ── */}
       <div className="dash-stats">
         {[
-          { label: 'Projects',   val: missions.length ? [...new Set(missions.map(m => m.project_id))].length : '—', color: '#58a6ff', click: 'projects' },
-          { label: 'Missions',   val: missions.length, color: '#58a6ff', click: 'missions' },
-          { label: 'Completed',  val: byStatus.completed || 0, color: '#3fb950', click: 'missions' },
-          { label: 'Running',    val: summary.running_agents, color: '#f0a84b', click: 'missions' },
-          { label: 'Free Slots', val: summary.free_slots, color: '#8b949e', click: 'fleet-config' },
-          { label: 'Cost Today', val: fmt(summary.cost_today_usd), color: '#bc8cff', click: null },
-        ].map(({ label, val, color, click }) => (
-          <div key={label} className="dash-stat-card" onClick={click ? () => navigate(click) : undefined} style={{ cursor: click ? 'pointer' : 'default' }}>
-            <div className="dash-stat-val" style={{ color }}>{val}</div>
+          { label: 'Projects',   val: missions.length ? [...new Set(missions.map(m => m.project_id))].length : 0, tone: 'neutral', click: 'projects' },
+          { label: 'Missions',   val: missions.length, tone: 'neutral', click: 'missions' },
+          { label: 'Completed',  val: byStatus.completed || 0, tone: 'g', click: 'missions' },
+          { label: 'Running',    val: summary.running_agents, tone: summary.running_agents > 0 ? 'a' : 'neutral', click: 'missions' },
+          { label: 'Free Slots', val: summary.free_slots ?? 0, tone: 'neutral', click: 'fleet-config' },
+          { label: 'Cost Today', val: fmt(summary.cost_today_usd), tone: 'neutral', click: null },
+        ].map(({ label, val, tone, click }) => (
+          <div
+            key={label}
+            className={`dash-stat-card dash-stat-card--${tone}`}
+            onClick={click ? () => navigate(click) : undefined}
+            style={{ cursor: click ? 'pointer' : 'default' }}
+          >
+            <div className="dash-stat-val">{val}</div>
             <div className="dash-stat-label">{label}</div>
           </div>
         ))}
@@ -170,16 +263,20 @@ export default function Dashboard({ navigate }) {
             <button className="dash-card-btn" onClick={() => navigate('fleet-config')}>Configure →</button>
           </div>
           <div className="lane-topology">
-            {lanes.map(l => (
-              <div key={l.name} className="lane-row" style={{ '--lc': l.color || '#888' }}>
-                <span className="lane-row-icon">{LANE_ICON[l.name] || '🤖'}</span>
-                <span className="lane-row-name">{l.name.replace('_', ' ')}</span>
-                <div className="lane-row-bar">
-                  <div className="lane-row-fill" style={{ width: `${(l.running / l.max_agents) * 100}%` }} />
+            {lanes.map(l => {
+              const ratio = l.max_agents ? l.running / l.max_agents : 0;
+              const rag = l.running === 0 ? 'g' : ratio >= 1 ? 'r' : 'a';
+              return (
+                <div key={l.name} className={`lane-row lane-row--${rag}`}>
+                  <span className="lane-row-tag">{laneTag(l.name)}</span>
+                  <span className="lane-row-name">{l.name.replace('_', ' ')}</span>
+                  <div className="lane-row-bar">
+                    <div className="lane-row-fill" style={{ width: `${ratio * 100}%` }} />
+                  </div>
+                  <span className="lane-row-count">{l.running}/{l.max_agents}</span>
                 </div>
-                <span className="lane-row-count">{l.running}/{l.max_agents}</span>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
 
@@ -218,21 +315,21 @@ export default function Dashboard({ navigate }) {
           </div>
         </div>
 
-        {/* Quick actions */}
+        {/* Quick actions — typographic, no emoji */}
         <div className="dash-card">
           <div className="dash-card-header"><span>Quick Actions</span></div>
           <div className="quick-actions">
             {[
-              { icon: '📁', label: 'New Project', sub: 'Start a new codebase or task group', page: 'projects' },
-              { icon: '🚀', label: 'Mission Board', sub: 'Browse + dispatch pending missions', page: 'missions' },
-              { icon: '⚙️', label: 'Fleet Config', sub: 'Edit lane capacity, models, presets', page: 'fleet-config' },
-              { icon: '✏️', label: 'Prompt Studio', sub: 'Edit lane prompts + MCP tool toggles', page: 'prompt-studio' },
-              { icon: '📊', label: 'Reports', sub: 'Browse filed agent reports', page: 'reports' },
-              { icon: '🔌', label: 'Integrations', sub: 'MCP servers + external tool wiring', page: 'integrations' },
-              { icon: '❤️', label: 'System Status', sub: 'Health monitor + incident log', page: 'status' },
-            ].map(({ icon, label, sub, page }) => (
+              { kbd: 'P', label: 'New Project',    sub: 'Start a new codebase or task group',   page: 'projects' },
+              { kbd: 'M', label: 'Mission Board',  sub: 'Browse and dispatch pending missions', page: 'missions' },
+              { kbd: 'F', label: 'Fleet Config',   sub: 'Lane capacity, models, presets',       page: 'fleet-config' },
+              { kbd: 'S', label: 'Prompt Studio',  sub: 'Lane prompts and MCP tool toggles',    page: 'prompt-studio' },
+              { kbd: 'R', label: 'Reports',        sub: 'Browse filed agent reports',            page: 'reports' },
+              { kbd: 'I', label: 'Integrations',   sub: 'MCP servers, external tool wiring',     page: 'integrations' },
+              { kbd: 'H', label: 'System Status',  sub: 'Health monitor and incident log',       page: 'status' },
+            ].map(({ kbd, label, sub, page }) => (
               <div key={label} className="quick-action-row" onClick={() => navigate(page)}>
-                <span className="qa-icon">{icon}</span>
+                <span className="qa-kbd">{kbd}</span>
                 <div className="qa-text">
                   <div className="qa-label">{label}</div>
                   <div className="qa-sub">{sub}</div>

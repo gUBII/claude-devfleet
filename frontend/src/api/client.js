@@ -10,10 +10,18 @@ async function request(path, options = {}) {
     },
     ...options,
   });
+  // 401 on the login endpoints is "wrong credentials" — surface the server's
+  // actual detail. Only treat 401 as a session expiry when an existing token
+  // is being used elsewhere.
   if (res.status === 401) {
-    localStorage.removeItem('devfleet_token');
-    window.dispatchEvent(new CustomEvent('devfleet:logout'));
-    throw new Error('Session expired — please log in again');
+    const isAuthEndpoint = path.startsWith('/auth/login') || path.startsWith('/auth/register');
+    if (!isAuthEndpoint && token) {
+      localStorage.removeItem('devfleet_token');
+      window.dispatchEvent(new CustomEvent('devfleet:logout'));
+      throw new Error('Session expired — please log in again');
+    }
+    const err = await res.json().catch(() => ({ detail: 'Unauthorized' }));
+    throw new Error(err.detail || 'Unauthorized');
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
@@ -241,6 +249,10 @@ export const getPlugins = () => request('/plugins');
 export const listLanes = () => request('/lanes');
 export const updateLane = (name, data) =>
   request(`/lanes/${name}`, { method: 'PUT', body: JSON.stringify(data) });
+export const createLane = (data) =>
+  request('/lanes', { method: 'POST', body: JSON.stringify(data) });
+export const deleteLane = (name) =>
+  request(`/lanes/${name}`, { method: 'DELETE' });
 
 // ── Prompt Studio ──
 export const getLanePrompt = (name) => request(`/lanes/${name}/prompt`);
@@ -273,6 +285,9 @@ export const changePassword = ({ current_password, new_password }) =>
     method: 'POST',
     body: JSON.stringify({ current_password, new_password }),
   });
+
+// ── Dev Profiles (public leaderboard) ─────────────────────────────────────────
+export const listDevProfiles = () => request('/dev-profiles');
 
 // ── Project Bot (Moofasa) ─────────────────────────────────────────────────────
 export const getBotHistory = (projectId) => request(`/projects/${projectId}/bot-history`);

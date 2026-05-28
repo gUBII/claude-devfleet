@@ -34,7 +34,11 @@ CREATE TABLE IF NOT EXISTS missions (
     schedule_cron TEXT,
     schedule_enabled INTEGER DEFAULT 0,
     last_scheduled_at TEXT,
-    mission_number INTEGER
+    mission_number INTEGER,
+    lane TEXT DEFAULT '',
+    created_by_email TEXT DEFAULT '',
+    created_by_name TEXT DEFAULT '',
+    is_chat_turn INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS agent_sessions (
@@ -222,6 +226,17 @@ CREATE TABLE IF NOT EXISTS project_bot_history (
 
 CREATE INDEX IF NOT EXISTS idx_bot_history_project
     ON project_bot_history(project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS dev_metrics (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    likeness_points INTEGER DEFAULT 0,
+    pr_merges_clean INTEGER DEFAULT 0,
+    pr_merges_total INTEGER DEFAULT 0,
+    dollars_saved_routing REAL DEFAULT 0,
+    current_clean_streak INTEGER DEFAULT 0,
+    longest_clean_streak INTEGER DEFAULT 0,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 
@@ -320,6 +335,31 @@ async def init_db():
             "granted_by TEXT, "
             "granted_at TEXT DEFAULT (datetime('now')), "
             "PRIMARY KEY (user_id, permission))",
+            # v13: GitHub identity bundle — populated from GET /user after PAT save.
+            # Used to set git config user.name/user.email per-user inside the
+            # worktree, so commits are attributed to the actual operator and
+            # pushes go out under their credential. noreply_email avoids
+            # leaking private primary emails.
+            "ALTER TABLE users ADD COLUMN github_login TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN github_name TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN github_noreply_email TEXT DEFAULT ''",
+            # v14: user-created lanes (Fleet Config "New Lane" button). Built-in
+            # lanes from LANE_DEFAULTS stay user_created=0 so the disable-on-
+            # startup guard never touches them; user lanes survive restarts.
+            "ALTER TABLE lanes ADD COLUMN user_created INTEGER DEFAULT 0",
+            # v15: dev_metrics — Likeness points + behaviour tracking.
+            # Populated lazily on first increment; admin users get no row
+            # (excluded by helpers in dev_metrics.py). Reads by DevProfiles
+            # dashboard.
+            "CREATE TABLE IF NOT EXISTS dev_metrics ("
+            "user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, "
+            "likeness_points INTEGER DEFAULT 0, "
+            "pr_merges_clean INTEGER DEFAULT 0, "
+            "pr_merges_total INTEGER DEFAULT 0, "
+            "dollars_saved_routing REAL DEFAULT 0, "
+            "current_clean_streak INTEGER DEFAULT 0, "
+            "longest_clean_streak INTEGER DEFAULT 0, "
+            "updated_at TEXT DEFAULT (datetime('now')))",
             # v16: skip_quality_gates opt-out flag — lets operators mark a mission
             # so the coder lane skips the REV-/TEST- sub-mission spawn step
             # and proceeds directly to submit_report.
@@ -364,13 +404,68 @@ async def init_db():
                 "Skipped github_token encryption migration: %s", _exc
             )
 
+        # v13 data migration: backfill identity columns for users who already
+        # have an encrypted token but pre-date the github_login column.
+        # Idempotent via the WHERE clause. Each GitHub /user call is a few
+        # hundred ms; capped at a handful of users in practice (≤ team size).
+        # Network/auth failure on any single user is logged and skipped — the
+        # row's identity stays empty and the persona prompt will nudge a
+        # re-paste.
+        try:
+            async with db.execute(
+                "SELECT id, github_token_encrypted FROM users "
+                "WHERE github_token_encrypted IS NOT NULL "
+                "AND github_token_encrypted != '' "
+                "AND (github_login IS NULL OR github_login = '')"
+            ) as cur:
+                _id_rows = await cur.fetchall()
+            if _id_rows:
+                import crypto as _crypto
+                from gh_identity import fetch_github_identity as _fetch_id
+                for _row in _id_rows:
+                    _uid, _enc = _row[0], _row[1]
+                    try:
+                        _plain = _crypto.decrypt(_enc)
+                    except Exception as _exc:
+                        import logging as _logging
+                        _logging.getLogger("devfleet").warning(
+                            "Identity backfill: decrypt failed for %s: %s",
+                            _uid, _exc,
+                        )
+                        continue
+                    _ident = await _fetch_id(_plain)
+                    if _ident is None:
+                        import logging as _logging
+                        _logging.getLogger("devfleet").warning(
+                            "Identity backfill: GitHub /user failed for %s "
+                            "(token may be revoked) — leaving empty",
+                            _uid,
+                        )
+                        continue
+                    await db.execute(
+                        "UPDATE users SET github_login=?, github_name=?, "
+                        "github_noreply_email=? WHERE id=?",
+                        (_ident.login, _ident.name, _ident.noreply_email, _uid),
+                    )
+                await db.commit()
+        except Exception as _exc:
+            import logging as _logging
+            _logging.getLogger("devfleet").warning(
+                "Skipped github identity backfill: %s", _exc
+            )
+
         # Full re-sync of all lane fields from LANE_DEFAULTS
         # INSERT OR IGNORE seeds new lanes; UPDATE syncs capacity/model/preset/style — but NOT
         # append_prompt, which the user can customise via Prompt Studio and must survive restarts.
         # Also disables lanes no longer in LANE_DEFAULTS (deprecated/renamed lanes)
         from models import LANE_DEFAULTS as _LD
+        # Disable lanes that were once in LANE_DEFAULTS but no longer are
+        # (deprecated/renamed built-ins). Excludes user-created lanes — those
+        # live independent of LANE_DEFAULTS and must survive restarts.
         await db.execute(
-            f"UPDATE lanes SET enabled=0 WHERE name NOT IN ({','.join('?' for _ in _LD)})",
+            f"UPDATE lanes SET enabled=0 "
+            f"WHERE name NOT IN ({','.join('?' for _ in _LD)}) "
+            f"AND COALESCE(user_created, 0) = 0",
             list(_LD.keys()),
         )
         for _lane_name, _policy in _LD.items():

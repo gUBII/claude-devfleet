@@ -187,8 +187,16 @@ async def set_github_token(
     user_id: str, token: str, github_username: str = ""
 ) -> None:
     """Store the user's GitHub PAT, encrypted at rest. The legacy plaintext
-    `github_token` column is cleared so we never have both copies on disk."""
+    `github_token` column is cleared so we never have both copies on disk.
+
+    After persisting the token, attempt to fetch the user's GitHub identity
+    (login + name + noreply email) and cache it on the row. Network failure
+    here is non-fatal — the token is already saved; the identity columns
+    just stay empty and worktree git config will fall back to the repo
+    default (which the persona prompt will flag).
+    """
     import crypto
+    from gh_identity import fetch_github_identity
 
     enc = crypto.encrypt(token)
     conn = await db.get_db()
@@ -201,6 +209,54 @@ async def set_github_token(
         await conn.commit()
     finally:
         await conn.close()
+
+    identity = await fetch_github_identity(token)
+    if identity is None:
+        log.warning(
+            "GitHub identity fetch failed for user %s — git author fields stay empty",
+            user_id,
+        )
+        return
+
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            "UPDATE users SET github_login=?, github_name=?, github_noreply_email=? "
+            "WHERE id=?",
+            (identity.login, identity.name, identity.noreply_email, user_id),
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def get_github_identity(user_id: str) -> dict | None:
+    """Return cached {login, name, noreply_email} or None if not populated.
+
+    Used by the dispatcher to set `git config user.name/user.email` inside
+    the worktree so commits land under the operator's identity rather than
+    Farhan's machine identity.
+    """
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT github_login, github_name, github_noreply_email "
+            "FROM users WHERE id=?",
+            (user_id,),
+        )
+    finally:
+        await conn.close()
+    if not rows:
+        return None
+    row = dict(rows[0])
+    login = (row.get("github_login") or "").strip()
+    if not login:
+        return None
+    return {
+        "login": login,
+        "name": (row.get("github_name") or "").strip() or login,
+        "noreply_email": (row.get("github_noreply_email") or "").strip(),
+    }
 
 
 async def get_github_token(user_id: str) -> tuple[str, str] | None:
@@ -250,7 +306,8 @@ async def clear_github_token(user_id: str) -> None:
     conn = await db.get_db()
     try:
         await conn.execute(
-            "UPDATE users SET github_token='', github_token_encrypted='', github_username='' "
+            "UPDATE users SET github_token='', github_token_encrypted='', github_username='', "
+            "github_login='', github_name='', github_noreply_email='' "
             "WHERE id=?",
             (user_id,),
         )

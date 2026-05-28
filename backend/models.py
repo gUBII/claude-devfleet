@@ -494,7 +494,7 @@ class ProjectChatRequest(BaseModel):
     message: str
     planner_mode: bool = False
     # New: explicit persona override. Slash commands in the message (/haiku,
-    # /sonnet, /opus) take precedence over this field. planner_mode=True still
+    # /gitsheba, /opus) take precedence over this field. planner_mode=True still
     # maps to architect persona for backward compatibility.
     force_persona: Optional[Literal["researcher", "git_operator", "architect"]] = None
 
@@ -563,7 +563,7 @@ CHAT_PERSONAS: dict[str, dict] = {
             "You are the **Researcher** persona of the DevFleet chat. "
             "Fetch information, read code, explain. "
             "You CANNOT modify files, push, merge, or run arbitrary shell. "
-            "If the user asks for an action, suggest invoking /sonnet (git ops) or /opus (plan)."
+            "If the user asks for an action, suggest invoking /gitsheba (git ops) or /opus (plan)."
         ),
     },
     "git_operator": {
@@ -583,7 +583,25 @@ CHAT_PERSONAS: dict[str, dict] = {
             "   diff summary. Do NOT run the command until ask_human returns a 'Human replied: approve'.\n"
             "3. Never use `--no-verify`, `push --force` on `main`/`master`, or `gh pr merge --admin`. "
             "   Refuse and explain.\n"
-            "4. Follow the project's commit attribution rules from CLAUDE.md — no AI co-author trailers."
+            "4. Follow the project's commit attribution rules from CLAUDE.md — no AI co-author trailers.\n\n"
+            "PR MERGE PROTOCOL (mandatory cadence — emit each phase as a separate "
+            "short text message so the operator sees live progress in chat):\n"
+            "  Phase 1 — Fetching: `Fetching PR #<N>…` then run `gh pr view <N> --json "
+            "number,title,headRefName,baseRefName,mergeable,mergeStateStatus`.\n"
+            "  Phase 2 — Diff:     `Diff: +<add> −<del> across <files> files, <conflicts> conflicts vs base` "
+            "(use `gh pr diff <N> --name-only` + `gh pr view <N> --json files`).\n"
+            "  Phase 3 — Proposed: `Proposed: <squash|rebase|merge> with title \"<title>\"`. "
+            "Default to `--squash` unless the operator specified otherwise.\n"
+            "  Phase 4 — Confirm:  `Awaiting your confirmation` — call `ask_human` with "
+            "the EXACT `gh pr merge` command you will run.\n"
+            "  Phase 5 — Merging:  `Merging…` then `gh pr merge <N> --squash --delete-branch`.\n"
+            "  Phase 6 — Done:     `Branch deleted, working dir clean ✓` (or `Merge failed: <error>`).\n"
+            "Silent execution between Phase 1 and Phase 5 is a protocol violation. "
+            "Every phase MUST emit a visible text line before the next tool call.\n\n"
+            "GIT IDENTITY: the worktree has `git config user.name`/`user.email` set to "
+            "the operator's GitHub login + noreply email. Commits you make are attributed "
+            "to them. If `git config user.email` returns empty or a generic machine "
+            "default, STOP and tell the operator to paste a fresh PAT — do not commit."
         ),
     },
     "architect": {

@@ -1,0 +1,189 @@
+/* ════════════════════════════════════════════════════════════════════
+   Farhan's DevFleet™ — Global Design Tokens
+   ────────────────────────────────────────────────────────────────────
+   Single source of truth for every visual axis. Imported once at the
+   top of index.css. NEVER hardcode colors/shadows/sizes elsewhere —
+   reference these tokens. A future palette swap is one block edit.
+   ════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── Brand ───────────────────────────────────────────────────────── */
+  --brand-mark: #d4a017;
+  --brand-mark-hot: #e8b820;
+  --brand-mark-soft: rgba(212, 160, 23, 0.12);
+  --brand-ink: #1a1408;                  /* dark text on amber */
+
+  /* ── RAG — state ONLY (red/amber/green) ──────────────────────────── */
+  --rag-g: #6ea358;
+  --rag-a: #d4a017;
+  --rag-r: #d36359;
+  --rag-g-soft: rgba(110, 163, 88, 0.12);
+  --rag-a-soft: rgba(212, 160, 23, 0.12);
+  --rag-r-soft: rgba(211, 99, 89, 0.12);
+  --rag-g-edge: rgba(110, 163, 88, 0.45);
+  --rag-a-edge: rgba(212, 160, 23, 0.45);
+  --rag-r-edge: rgba(211, 99, 89, 0.45);
+
+  /* ── Surface — five tiers, deepest → elevated ────────────────────── */
+  --surf-0: #09090b;                     /* page bg */
+  --surf-1: #0f0f13;                     /* sidebar / sunk panels */
+  --surf-2: #18181b;                     /* card body */
+  --surf-3: #1e1e23;                     /* elevated card */
+  --surf-4: #27272a;                     /* hover */
+  --surf-input: #111114;                 /* form fields */
+
+  /* Legacy aliases — keep until full audit lands */
+  --bg-base: var(--surf-0);
+  --bg-sidebar: var(--surf-1);
+  --bg-surface: var(--surf-2);
+  --bg-elevated: var(--surf-3);
+  --bg-hover: var(--surf-4);
+  --bg-input: var(--surf-input);
+  --surface-card: var(--surf-3);
+  --surface-hover: var(--surf-4);
+
+  /* ── Ink (text) ──────────────────────────────────────────────────── */
+  --ink-0: #fafafa;
+  --ink-1: #a1a1aa;
+  --ink-2: #71717a;
+  --ink-3: #52525b;
+
+  --text-primary: var(--ink-0);
+  --text-secondary: var(--ink-1);
+  --text-muted: var(--ink-2);
+  --text-dim: var(--ink-3);
+
+  /* ── Edges ───────────────────────────────────────────────────────── */
+  --edge-1: rgba(255, 255, 255, 0.06);
+  --edge-2: rgba(255, 255, 255, 0.12);
+  --edge-3: rgba(255, 255, 255, 0.22);
+
+  --border-subtle: rgba(255, 255, 255, 0.03);
+  --border: var(--edge-1);
+  --border-strong: var(--edge-2);
+
+  /* ── Hardware depth ──────────────────────────────────────────────── */
+  /* Light comes from above. Top edge is highlighted, bottom is shadowed. */
+  --bevel-top: rgba(255, 255, 255, 0.08);
+  --bevel-bottom: rgba(0, 0, 0, 0.45);
+
+  /* Raised — idle hardware (button at rest, sitting on the panel) */
+  --shadow-raised:
+    0 1px 0 var(--bevel-top) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.55) inset,
+    0 2px 4px rgba(0, 0, 0, 0.4),
+    0 1px 0 rgba(0, 0, 0, 0.6);
+
+  /* Pressed — finger pushing it down */
+  --shadow-pressed:
+    0 2px 4px rgba(0, 0, 0, 0.55) inset,
+    0 -1px 0 rgba(255, 255, 255, 0.02) inset,
+    0 1px 0 rgba(255, 255, 255, 0.02);
+
+  /* Recessed — permanently sunk (active nav item, selected segment) */
+  --shadow-recessed:
+    0 3px 6px rgba(0, 0, 0, 0.55) inset,
+    0 -1px 0 rgba(255, 255, 255, 0.03) inset,
+    0 1px 0 rgba(255, 255, 255, 0.02);
+
+  /* Amber glow halo — primary button, active LEDs */
+  --shadow-glow-amber: 0 0 14px rgba(212, 160, 23, 0.4);
+  --shadow-glow-amber-strong: 0 0 22px rgba(212, 160, 23, 0.55);
+  --shadow-glow-g: 0 0 10px rgba(110, 163, 88, 0.55);
+  --shadow-glow-r: 0 0 10px rgba(211, 99, 89, 0.55);
+
+  /* Plain drop shadows (non-hardware) */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+
+  /* ── Gradients for hardware surfaces ─────────────────────────────── */
+  /* Subtle top-light gradient: lighter at top, darker at bottom */
+  --grad-raised: linear-gradient(180deg, #2a2a2e 0%, #1c1c20 100%);
+  --grad-raised-hover: linear-gradient(180deg, #313136 0%, #202024 100%);
+  --grad-pressed: linear-gradient(180deg, #131316 0%, #1a1a1e 100%);
+  --grad-primary: linear-gradient(180deg, #e8b820 0%, #c89615 100%);
+  --grad-primary-hover: linear-gradient(180deg, #f0c324 0%, #d4a017 100%);
+
+  /* ── Type — fluid scale via clamp() ──────────────────────────────── */
+  --fs-micro: clamp(10px, 0.45vw + 7.5px, 11.5px);
+  --fs-small: clamp(11px, 0.6vw + 8px, 13px);
+  --fs-body:  clamp(12px, 0.85vw + 7px, 14px);
+  --fs-h3:    clamp(13px, 0.7vw + 10px, 16px);
+  --fs-h2:    clamp(15px, 0.85vw + 11px, 20px);
+  --fs-h1:    clamp(26px, 3.6vw + 4px, 60px);
+  --fs-kpi:   clamp(26px, 3.5vw + 8px, 52px);
+
+  /* Letter-spacing scale for industrial mono headings */
+  --tracking-tight: -0.025em;
+  --tracking-base: 0;
+  --tracking-wide: 0.08em;
+  --tracking-wider: 0.14em;
+  --tracking-widest: 0.18em;
+  --tracking-mega: 0.32em;
+
+  /* ── Spacing scale (4px base) ────────────────────────────────────── */
+  --sp-0: 0;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+  --sp-8: 64px;
+
+  /* Workstation padding (responsive) */
+  --ws-pad-x: clamp(18px, 2.2vw, 32px);
+  --ws-pad-y: clamp(18px, 2vw, 28px);
+
+  /* ── Radius ──────────────────────────────────────────────────────── */
+  /* Workstation: sharp by default. These exist for legacy non-ws areas. */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-full: 9999px;
+  --radius-sharp: 0;
+
+  /* ── Motion ──────────────────────────────────────────────────────── */
+  --t-fast: 80ms;
+  --t-base: 150ms;
+  --t-slow: 300ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-press: cubic-bezier(0.4, 0, 0.6, 1);
+
+  /* ── Fonts ───────────────────────────────────────────────────────── */
+  --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+  --font-display: 'Space Mono', var(--font-mono);
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
+
+  /* ── Legacy palette (accent / status) — kept until app-wide refactor */
+  --accent: #da7756;
+  --accent-hover: #c96a4b;
+  --accent-soft: rgba(218, 119, 86, 0.08);
+  --accent-glow: rgba(218, 119, 86, 0.2);
+  --accent-text: #e8956e;
+
+  --success: var(--rag-g);
+  --success-soft: var(--rag-g-soft);
+  --warning: var(--rag-a);
+  --warning-soft: var(--rag-a-soft);
+  --danger: var(--rag-r);
+  --danger-soft: var(--rag-r-soft);
+  --info: #3b82f6;
+  --info-soft: rgba(59, 130, 246, 0.1);
+
+  --status-draft: var(--ink-2);
+  --status-queued: #3b82f6;
+  --status-running: var(--rag-a);
+  --status-completed: var(--rag-g);
+  --status-failed: var(--rag-r);
+  --status-cancelled: var(--ink-1);
+
+  --terminal-bg: #0a0a0a;
+  --terminal-text: var(--rag-g);
+  --terminal-border: rgba(110, 163, 88, 0.15);
+
+  /* ── Layout ──────────────────────────────────────────────────────── */
+  --sidebar-width: 240px;
+}

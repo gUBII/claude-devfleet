@@ -142,6 +142,76 @@ async def test_run_inline_yields_text_events(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_inline_does_not_double_emit_via_result_message(monkeypatch):
+    """SDK emits text once via AssistantMessage TextBlocks and again via the
+    terminal ResultMessage.result. Inline persona must only stream the blocks;
+    the final ResultMessage is metadata, not a second copy of the reply."""
+    from chat_personas import run_inline_persona
+    import claude_code_sdk
+    from claude_code_sdk.types import TextBlock
+
+    class AssistantStub:
+        def __init__(self, text: str):
+            self.content = [TextBlock(text=text)]
+
+    class ResultStub:
+        # No `content`, only `result` — mirrors the SDK's terminal message
+        def __init__(self, text: str):
+            self.result = text
+
+    async def fake_query(prompt, options):
+        yield AssistantStub("hello ")
+        yield AssistantStub("world")
+        yield ResultStub("hello world")  # full reply again — must NOT be re-yielded
+
+    monkeypatch.setattr("claude_code_sdk.query", fake_query)
+
+    events = []
+    async for ev in run_inline_persona(
+        "researcher",
+        {"id": "p1", "name": "x", "path": "/tmp", "description": ""},
+        {"email": "a@b"}, "say hello", [],
+    ):
+        events.append(ev)
+
+    text_events = [e for e in events if e["type"] == "text"]
+    assert len(text_events) == 2, (
+        f"expected only the 2 TextBlocks, got {len(text_events)} "
+        f"(ResultMessage.result was double-yielded)"
+    )
+    assert "".join(e["text"] for e in text_events) == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_run_inline_falls_back_to_result_when_no_text_blocks(monkeypatch):
+    """If the SDK happens to skip TextBlocks and only emits a ResultMessage
+    (rare lightweight path), we must still surface the reply — otherwise the
+    chat goes silent."""
+    from chat_personas import run_inline_persona
+
+    class ResultOnlyStub:
+        def __init__(self, text: str):
+            self.result = text
+
+    async def fake_query(prompt, options):
+        yield ResultOnlyStub("just the result")
+
+    monkeypatch.setattr("claude_code_sdk.query", fake_query)
+
+    events = []
+    async for ev in run_inline_persona(
+        "researcher",
+        {"id": "p1", "name": "x", "path": "/tmp", "description": ""},
+        {"email": "a@b"}, "hi", [],
+    ):
+        events.append(ev)
+
+    text_events = [e for e in events if e["type"] == "text"]
+    assert len(text_events) == 1
+    assert text_events[0]["text"] == "just the result"
+
+
+@pytest.mark.asyncio
 async def test_run_inline_emits_error_on_exception(monkeypatch):
     """If the SDK call raises, an error event must be yielded — the chat
     stream should never hang or expose a stack trace."""
@@ -511,3 +581,36 @@ async def test_synthetic_mission_excluded_from_watcher_eligibility(tmp_db, monke
     eligible = await mission_watcher._find_eligible_missions(lane_capacity)
     eligible_ids = [m["id"] for m in eligible]
     assert result["mission_id"] not in eligible_ids
+
+
+# ─── PR merge protocol prompt cadence ─────────────────────────────────────
+
+
+def test_git_operator_prompt_declares_pr_merge_protocol():
+    """The persona prompt MUST spell out all six phases of the PR merge cadence.
+
+    The agent's actual output cadence depends on a real SDK conversation, so we
+    test the contract at the prompt layer: every required phase keyword is
+    present, and the prompt forbids silent execution between fetch and merge.
+    """
+    from models import CHAT_PERSONAS
+
+    prompt = CHAT_PERSONAS["git_operator"]["system_prompt_extra"]
+
+    # Six-phase cadence labels
+    assert "Phase 1" in prompt and "Fetching" in prompt
+    assert "Phase 2" in prompt and "Diff:" in prompt
+    assert "Phase 3" in prompt and "Proposed:" in prompt
+    assert "Phase 4" in prompt and "Awaiting your confirmation" in prompt
+    assert "Phase 5" in prompt and "Merging" in prompt
+    assert "Phase 6" in prompt
+
+    # Silent-execution prohibition between fetch and merge
+    assert "Silent execution" in prompt or "silent execution" in prompt.lower()
+
+    # ask_human enforcement before merge
+    assert "ask_human" in prompt
+
+    # Identity-aware: prompt must mention the worktree git config so the agent
+    # refuses to commit when identity is missing
+    assert "git config user.email" in prompt or "git config user.name" in prompt

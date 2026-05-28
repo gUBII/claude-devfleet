@@ -169,6 +169,7 @@ async def _build_sdk_options(
     resume_session_id: str | None = None,
     extra_mcp_servers: dict | None = None,
     github_token: str | None = None,
+    git_identity: dict | None = None,
 ) -> ClaudeCodeOptions:
     """Build ClaudeCodeOptions from mission config + dispatch overrides."""
 
@@ -358,15 +359,38 @@ async def _build_sdk_options(
     # placeholder, which previously violated downstream IP/attribution rules
     # (commits like `Devfleet <agent@devfleet.local>` had to be rewritten
     # post-cherry-pick before shipping to protected branches).
-    _creator_name = mission.get("created_by_name")
-    _creator_email = mission.get("created_by_email")
+    # GitHub identity wins when populated — it gives a real noreply email that
+    # GitHub will attribute to the operator's profile. Fall back to the
+    # mission's chat-creator fields (local-only emails like adil@devfleet.local)
+    # only when no PAT-derived identity exists.
     _git_env: dict[str, str] = {}
-    if _creator_name and _creator_name.strip():
-        _git_env["GIT_AUTHOR_NAME"] = _creator_name.strip()
-        _git_env["GIT_COMMITTER_NAME"] = _creator_name.strip()
-    if _creator_email and _creator_email.strip():
-        _git_env["GIT_AUTHOR_EMAIL"] = _creator_email.strip()
-        _git_env["GIT_COMMITTER_EMAIL"] = _creator_email.strip()
+    if git_identity and git_identity.get("login"):
+        _name = (git_identity.get("name") or git_identity.get("login") or "").strip()
+        _email = (git_identity.get("noreply_email") or "").strip()
+        if _name:
+            _git_env["GIT_AUTHOR_NAME"] = _name
+            _git_env["GIT_COMMITTER_NAME"] = _name
+        if _email:
+            _git_env["GIT_AUTHOR_EMAIL"] = _email
+            _git_env["GIT_COMMITTER_EMAIL"] = _email
+    else:
+        _creator_name = mission.get("created_by_name")
+        _creator_email = mission.get("created_by_email")
+        if _creator_name and _creator_name.strip():
+            _git_env["GIT_AUTHOR_NAME"] = _creator_name.strip()
+            _git_env["GIT_COMMITTER_NAME"] = _creator_name.strip()
+        if _creator_email and _creator_email.strip():
+            _git_env["GIT_AUTHOR_EMAIL"] = _creator_email.strip()
+            _git_env["GIT_COMMITTER_EMAIL"] = _creator_email.strip()
+
+    # GH_TOKEN must reach the agent's Bash tool (where `gh pr merge` / `git push`
+    # run), not only the MCP subprocesses. Without this, pushes fall back to
+    # the host's credential helper (likely Farhan's PAT) and the per-user-
+    # attribution promise breaks silently.
+    _agent_env: dict[str, str] = dict(_git_env)
+    if github_token:
+        _agent_env["GH_TOKEN"] = github_token
+        _agent_env["GITHUB_TOKEN"] = github_token
 
     kwargs = dict(
         model=model,
@@ -378,7 +402,7 @@ async def _build_sdk_options(
         resume=resume_session_id,
         include_partial_messages=False,
         hooks=stop_hooks,
-        env={**os.environ, **_git_env},
+        env={**os.environ, **_agent_env},
     )
     if mcp_servers:
         kwargs["mcp_servers"] = mcp_servers
@@ -496,6 +520,7 @@ async def _run_agent(
     existing_tokens: int = 0,
     worktree_branch: str | None = None,
     github_token: str | None = None,
+    git_identity: dict | None = None,
 ):
     """Unified agent runner for both dispatch and resume."""
     output_chunks = []
@@ -541,6 +566,7 @@ async def _run_agent(
             resume_session_id=resume_session_id,
             extra_mcp_servers=extra_mcp or None,
             github_token=github_token,
+            git_identity=git_identity,
         )
         model_used = sdk_options.model or "claude-sonnet-4-6"
 
@@ -737,6 +763,19 @@ async def _run_agent(
         }))
         log.info("Session %s completed (cost $%.4f, tokens %d)", session_id, total_cost, total_tokens)
 
+        # Feature 2: credit the dev for a successful chat-driven PR merge.
+        # No-op when the session wasn't a chat git_operator turn or the
+        # intent wasn't pr_merge. Wrapped so failure can't break the dispatch.
+        try:
+            import dev_metrics
+            await dev_metrics.credit_chat_pr_merge_if_eligible(
+                session_id, succeeded=True, output_log=full_output,
+            )
+        except Exception:
+            log.exception(
+                "Failed to credit chat PR merge for session %s", session_id
+            )
+
     except asyncio.CancelledError:
         watchdog_task.cancel()
         is_takeover = session_id in _takeover_sessions
@@ -812,6 +851,19 @@ async def _run_agent(
                 "UPDATE missions SET status='failed', updated_at=? WHERE id=?",
                 (ended_at, mission["id"]),
             )
+            # Feature 2: failed chat PR merge resets the dev's clean streak.
+            # Same eligibility filter as the success path — only fires for
+            # chat git_operator turns with intent=pr_merge.
+            try:
+                import dev_metrics
+                await dev_metrics.credit_chat_pr_merge_if_eligible(
+                    session_id, succeeded=False, output_log=full_output,
+                )
+            except Exception:
+                log.exception(
+                    "Failed to reset chat PR merge streak for session %s",
+                    session_id,
+                )
             # Record failure layer for observability and downstream classification
             await conn.execute(
                 "INSERT INTO mission_events (mission_id, event_type, data, failure_layer) VALUES (?, ?, ?, ?)",
@@ -892,7 +944,10 @@ async def dispatch_mission(
     full_prompt = build_prompt(mission, last_report)
     project_path = resolve_path(mission["project_path"])
 
-    worktree_path, worktree_branch = await create_worktree(project_path, session_id, mission=mission)
+    git_identity = await _resolve_git_identity(mission)
+    worktree_path, worktree_branch = await create_worktree(
+        project_path, session_id, mission=mission, git_identity=git_identity,
+    )
     work_dir = worktree_path or project_path
 
     if worktree_branch:
@@ -916,7 +971,36 @@ async def dispatch_mission(
         opts=opts,
         worktree_branch=worktree_branch,
         github_token=github_token,
+        git_identity=git_identity,
     )
+
+
+async def _resolve_git_identity(mission: dict) -> dict | None:
+    """Look up cached GitHub identity for the mission creator, if any.
+
+    Resolves user_id via `created_by_email` (missions don't carry a direct
+    user_id FK). Returns None on any failure — `create_worktree` handles
+    missing identity gracefully.
+    """
+    email = (mission.get("created_by_email") or "").strip()
+    if not email:
+        return None
+    try:
+        import auth as _auth
+        conn = await db.get_db()
+        try:
+            rows = await conn.execute_fetchall(
+                "SELECT id FROM users WHERE email=?", (email,),
+            )
+        finally:
+            await conn.close()
+        if not rows:
+            return None
+        user_id = dict(rows[0])["id"]
+        return await _auth.get_github_identity(user_id)
+    except Exception as exc:
+        log.warning("git identity resolve failed for %s: %s", email, exc)
+        return None
 
 
 async def resume_mission(
@@ -941,7 +1025,10 @@ async def resume_mission(
     finally:
         await conn.close()
 
-    worktree_path, worktree_branch = await create_worktree(project_path, session_id, mission=mission)
+    git_identity = await _resolve_git_identity(mission)
+    worktree_path, worktree_branch = await create_worktree(
+        project_path, session_id, mission=mission, git_identity=git_identity,
+    )
     work_dir = worktree_path or project_path
 
     if worktree_branch:
@@ -968,6 +1055,7 @@ async def resume_mission(
         existing_cost=existing.get("total_cost_usd") or 0,
         existing_tokens=existing.get("total_tokens") or 0,
         worktree_branch=worktree_branch,
+        git_identity=git_identity,
     )
 
 

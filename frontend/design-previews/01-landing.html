@@ -1,0 +1,604 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Farhan's DevFleet™ — Three names. One fleet.</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- Display: Fraunces — a contemporary serif with soft optical sizes
+     Body:    Söhne-substitute via "Newsreader" + a wide mono for accents -->
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,300..900,0..100,0..1&family=Newsreader:opsz,wght@6..72,300..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink:        #15110d;
+    --ink-soft:   #2a241b;
+    --paper:      #f3ecde;
+    --paper-2:    #ecdfca;
+    --rule:       #1a1209;
+    --accent:     #b4421b;      /* terracotta — earthen, not orange-juice */
+    --accent-2:   #c89b3c;      /* aged gold */
+    --shadow:     rgba(21,17,13,0.08);
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Newsreader", Georgia, serif;
+    font-size: 18px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Paper grain — subtle SVG noise */
+  body::before {
+    content: "";
+    position: fixed; inset: 0;
+    pointer-events: none;
+    z-index: 100;
+    opacity: 0.5;
+    mix-blend-mode: multiply;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.08 0 0 0 0 0.07 0 0 0 0 0.05 0 0 0 0.18 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  }
+
+  /* Masthead — newspaper-style */
+  .masthead {
+    border-bottom: 2px solid var(--rule);
+    padding: 18px 48px;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: end;
+    gap: 32px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+  .masthead .left  { text-align: left;   color: var(--ink-soft); }
+  .masthead .right { text-align: right;  color: var(--ink-soft); }
+  .masthead .center {
+    font-family: "Fraunces", serif;
+    font-weight: 600;
+    font-size: 20px;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    color: var(--ink);
+    font-variation-settings: "opsz" 144, "SOFT" 30;
+  }
+
+  /* Hero */
+  .hero {
+    padding: 80px 48px 64px;
+    border-bottom: 1px solid var(--rule);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 380px;
+    gap: 64px;
+    align-items: end;
+    position: relative;
+  }
+  .hero::after {
+    content: "VOL. I  ·  ISSUE 01  ·  AGENT FLEET ENGINEERING";
+    position: absolute;
+    top: 16px; left: 48px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    letter-spacing: 0.32em;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+  .hero h1 {
+    margin: 0;
+    font-family: "Fraunces", serif;
+    font-weight: 400;
+    font-style: italic;
+    font-size: clamp(64px, 9vw, 160px);
+    line-height: 0.92;
+    letter-spacing: -0.04em;
+    color: var(--ink);
+    font-variation-settings: "opsz" 144, "SOFT" 50, "WONK" 1;
+  }
+  .hero h1 .roman {
+    font-style: normal;
+    font-weight: 300;
+    color: var(--ink);
+  }
+  .hero h1 .crimson { color: var(--accent); }
+  .hero .dek {
+    border-top: 1px solid var(--rule);
+    padding-top: 18px;
+    font-family: "Newsreader", serif;
+    font-size: 17px;
+    line-height: 1.5;
+    color: var(--ink-soft);
+    max-width: 380px;
+  }
+  .hero .dek strong {
+    font-weight: 700;
+    color: var(--ink);
+  }
+  .hero .dek .meta {
+    margin-top: 24px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink);
+    display: flex;
+    gap: 18px;
+  }
+  .hero .dek .meta span::before {
+    content: "✦  ";
+    color: var(--accent);
+  }
+
+  /* Avatars (Kiran / Probaho / Arun) */
+  .avatars {
+    padding: 72px 48px;
+    border-bottom: 1px solid var(--rule);
+    background: linear-gradient(180deg, transparent 0%, var(--paper-2) 100%);
+  }
+  .avatars-header {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: baseline;
+    gap: 32px;
+    padding-bottom: 36px;
+    margin-bottom: 48px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .avatars-header .chapter {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    letter-spacing: 0.32em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .avatars-header h2 {
+    margin: 0;
+    font-family: "Fraunces", serif;
+    font-weight: 500;
+    font-size: clamp(28px, 3vw, 44px);
+    letter-spacing: -0.02em;
+    font-variation-settings: "opsz" 72;
+  }
+  .avatars-header em {
+    font-family: "Newsreader", serif;
+    font-style: italic;
+    font-weight: 300;
+    font-size: 15px;
+    color: var(--ink-soft);
+    max-width: 320px;
+    text-align: right;
+    line-height: 1.4;
+  }
+
+  .avatars-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0;
+    border-left: 1px solid var(--rule);
+  }
+  .avatar {
+    border-right: 1px solid var(--rule);
+    padding: 40px 36px;
+    position: relative;
+    transition: background 0.4s ease;
+  }
+  .avatar:hover { background: rgba(180, 66, 27, 0.04); }
+  .avatar .glyph {
+    width: 100%;
+    height: 200px;
+    margin-bottom: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .avatar .glyph svg { width: 160px; height: 160px; }
+  .avatar .role {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 10px;
+  }
+  .avatar .name {
+    font-family: "Fraunces", serif;
+    font-style: italic;
+    font-weight: 400;
+    font-size: 52px;
+    line-height: 1;
+    letter-spacing: -0.03em;
+    margin-bottom: 6px;
+    font-variation-settings: "opsz" 144, "SOFT" 50;
+  }
+  .avatar .name-roman {
+    font-family: "Fraunces", serif;
+    font-weight: 300;
+    font-size: 13px;
+    letter-spacing: 0.32em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin-bottom: 28px;
+  }
+  .avatar .quote {
+    font-family: "Newsreader", serif;
+    font-style: italic;
+    font-size: 16px;
+    line-height: 1.45;
+    color: var(--ink);
+    border-top: 1px solid var(--rule);
+    padding-top: 20px;
+    margin-bottom: 20px;
+  }
+  .avatar .spec {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    line-height: 1.7;
+    color: var(--ink-soft);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .avatar .spec b { color: var(--ink); font-weight: 700; }
+
+  /* Pull quote / interlude */
+  .pull {
+    padding: 96px 48px;
+    border-bottom: 1px solid var(--rule);
+    display: grid;
+    grid-template-columns: 1fr 4fr 1fr;
+    gap: 48px;
+  }
+  .pull blockquote {
+    margin: 0;
+    font-family: "Fraunces", serif;
+    font-style: italic;
+    font-weight: 300;
+    font-size: clamp(28px, 4vw, 56px);
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+    font-variation-settings: "opsz" 144, "SOFT" 80;
+  }
+  .pull blockquote .accent { color: var(--accent); font-style: normal; font-weight: 400; }
+  .pull .attrib {
+    margin-top: 32px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  /* How it runs — three columns of dense text */
+  .how {
+    padding: 80px 48px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .how-head {
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 18px;
+    margin-bottom: 48px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .how-head .chapter {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    letter-spacing: 0.32em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .how-head h2 {
+    margin: 0;
+    font-family: "Fraunces", serif;
+    font-weight: 400;
+    font-style: italic;
+    font-size: clamp(40px, 5vw, 80px);
+    letter-spacing: -0.025em;
+    font-variation-settings: "opsz" 144;
+  }
+  .how-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0;
+    border-top: 1px solid var(--rule);
+    border-left: 1px solid var(--rule);
+  }
+  .step {
+    border-right: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+    padding: 36px 32px;
+  }
+  .step .num {
+    font-family: "Fraunces", serif;
+    font-weight: 300;
+    font-size: 96px;
+    line-height: 0.9;
+    color: var(--accent);
+    margin-bottom: 16px;
+    font-variation-settings: "opsz" 144, "WONK" 1;
+  }
+  .step h3 {
+    margin: 0 0 12px;
+    font-family: "Fraunces", serif;
+    font-weight: 500;
+    font-size: 22px;
+    letter-spacing: -0.01em;
+  }
+  .step p {
+    margin: 0;
+    font-family: "Newsreader", serif;
+    font-size: 15.5px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+  }
+
+  /* Final spread — call to action with mast */
+  .spread {
+    padding: 120px 48px 80px;
+    text-align: center;
+    background: var(--ink);
+    color: var(--paper);
+    position: relative;
+    overflow: hidden;
+  }
+  .spread::before {
+    content: "✦";
+    position: absolute;
+    top: 32px; left: 50%;
+    transform: translateX(-50%);
+    color: var(--accent);
+    font-size: 20px;
+  }
+  .spread h2 {
+    margin: 0;
+    font-family: "Fraunces", serif;
+    font-weight: 300;
+    font-style: italic;
+    font-size: clamp(56px, 8vw, 132px);
+    line-height: 0.95;
+    letter-spacing: -0.035em;
+    font-variation-settings: "opsz" 144, "SOFT" 100, "WONK" 1;
+  }
+  .spread h2 .crimson { color: var(--accent-2); }
+  .spread .sub {
+    margin-top: 28px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 12px;
+    letter-spacing: 0.36em;
+    text-transform: uppercase;
+    color: rgba(243, 236, 222, 0.6);
+  }
+  .spread .cta {
+    margin-top: 56px;
+    display: inline-flex;
+    gap: 20px;
+  }
+  .cta a {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 12px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--ink);
+    background: var(--paper);
+    padding: 18px 32px;
+    text-decoration: none;
+    border: 1px solid var(--paper);
+    transition: all 0.25s ease;
+  }
+  .cta a:hover {
+    background: var(--accent);
+    color: var(--paper);
+    border-color: var(--accent);
+  }
+  .cta a.ghost {
+    background: transparent;
+    color: var(--paper);
+  }
+  .cta a.ghost:hover {
+    background: var(--paper);
+    color: var(--ink);
+  }
+
+  /* Footer */
+  footer {
+    padding: 28px 48px;
+    background: var(--ink);
+    color: rgba(243, 236, 222, 0.55);
+    border-top: 1px solid rgba(243, 236, 222, 0.1);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  /* Page-load reveals */
+  @keyframes rise {
+    0%   { opacity: 0; transform: translateY(18px); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+  .hero h1 .reveal { display: inline-block; animation: rise 0.9s cubic-bezier(0.16, 1, 0.3, 1) both; }
+  .hero h1 .reveal:nth-child(1) { animation-delay: 0.05s; }
+  .hero h1 .reveal:nth-child(2) { animation-delay: 0.15s; }
+  .hero h1 .reveal:nth-child(3) { animation-delay: 0.30s; }
+  .hero .dek           { animation: rise 1.1s 0.45s cubic-bezier(0.16, 1, 0.3, 1) both; }
+  .masthead            { animation: rise 0.6s ease both; }
+
+  @media (max-width: 900px) {
+    .hero, .pull, .how, .avatars { padding-left: 24px; padding-right: 24px; }
+    .hero { grid-template-columns: 1fr; gap: 40px; }
+    .avatars-grid, .how-grid { grid-template-columns: 1fr; }
+    .pull { grid-template-columns: 1fr; }
+    .pull blockquote { font-size: 32px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="left">EST. MMXXVI · Dhaka → Sydney → Anywhere · Issue No. 01</div>
+  <div class="center">Farhan's DevFleet™</div>
+  <div class="right">Autonomous coding agents · কোডিং বহর</div>
+</header>
+
+<section class="hero">
+  <h1>
+    <span class="reveal">Three names.</span><br>
+    <span class="reveal roman">One </span><span class="reveal crimson">fleet.</span>
+  </h1>
+  <div class="dek">
+    <p><strong>Farhan's DevFleet™</strong> dispatches autonomous coding agents — each one running in its own git worktree, coordinating through dependency-aware lanes, committing under your own identity. No mock seats. No theatre. Real PRs.</p>
+    <div class="meta">
+      <span>Banao</span>
+      <span>Dekho</span>
+      <span>Pathao</span>
+    </div>
+  </div>
+</section>
+
+<section class="avatars">
+  <div class="avatars-header">
+    <div class="chapter">Chapter I · The Roster</div>
+    <h2>The three avatars of the fleet.</h2>
+    <em>Named in Bangla — কিরণ, প্রবাহ, অরুণ — for the light that scouts, the river that ships, and the dawn that designs.</em>
+  </div>
+
+  <div class="avatars-grid">
+
+    <div class="avatar">
+      <div class="glyph">
+        <!-- Sun / rays — Kiran means 'ray of light' -->
+        <svg viewBox="0 0 160 160" fill="none" stroke="currentColor" stroke-width="1.2" style="color: var(--ink);">
+          <circle cx="80" cy="80" r="22" fill="var(--accent)" stroke="none"/>
+          <g stroke-linecap="round">
+            <line x1="80" y1="12" x2="80" y2="34"/>
+            <line x1="80" y1="126" x2="80" y2="148"/>
+            <line x1="12" y1="80" x2="34" y2="80"/>
+            <line x1="126" y1="80" x2="148" y2="80"/>
+            <line x1="33" y1="33" x2="48" y2="48"/>
+            <line x1="112" y1="112" x2="127" y2="127"/>
+            <line x1="33" y1="127" x2="48" y2="112"/>
+            <line x1="112" y1="48" x2="127" y2="33"/>
+          </g>
+          <circle cx="80" cy="80" r="44" stroke-dasharray="2 4"/>
+        </svg>
+      </div>
+      <div class="role">Tier · Light · Researcher</div>
+      <div class="name">Kiran</div>
+      <div class="name-roman">কিরণ  ·  Ray of Light</div>
+      <div class="quote">“Fast, frugal, sees the shape of a problem before the rest of us finish reading.”</div>
+      <div class="spec">
+        <b>Model</b> Haiku 4.5<br>
+        <b>Best for</b> Triage, lint, rename, scan<br>
+        <b>Cost</b> ~$0.10 – $1 / mission
+      </div>
+    </div>
+
+    <div class="avatar">
+      <!-- River / wave — Probaho means 'flow / current' -->
+      <div class="glyph">
+        <svg viewBox="0 0 160 160" fill="none" stroke="currentColor" stroke-width="1.2" style="color: var(--ink);">
+          <path d="M10 60 C 40 30, 60 90, 90 60 S 140 90, 158 60"/>
+          <path d="M10 80 C 40 50, 60 110, 90 80 S 140 110, 158 80" stroke="var(--accent)"/>
+          <path d="M10 100 C 40 70, 60 130, 90 100 S 140 130, 158 100"/>
+          <circle cx="80" cy="80" r="60" stroke-dasharray="2 6" opacity="0.4"/>
+        </svg>
+      </div>
+      <div class="role">Tier · Flow · Git Operator</div>
+      <div class="name">Probaho</div>
+      <div class="name-roman">প্রবাহ  ·  Flow</div>
+      <div class="quote">“The river that moves work downstream — branches, commits, merges, all without theatre.”</div>
+      <div class="spec">
+        <b>Model</b> Sonnet 4.6<br>
+        <b>Best for</b> Implementation, fixes, PRs<br>
+        <b>Cost</b> ~$1 – $5 / mission
+      </div>
+    </div>
+
+    <div class="avatar">
+      <!-- Sunrise arc — Arun means 'dawn / red of sunrise' -->
+      <div class="glyph">
+        <svg viewBox="0 0 160 160" fill="none" stroke="currentColor" stroke-width="1.2" style="color: var(--ink);">
+          <line x1="10" y1="120" x2="150" y2="120"/>
+          <path d="M30 120 A 50 50 0 0 1 130 120" fill="var(--accent)" fill-opacity="0.85" stroke="none"/>
+          <path d="M30 120 A 50 50 0 0 1 130 120"/>
+          <g stroke-linecap="round" stroke-width="1.4">
+            <line x1="80" y1="42" x2="80" y2="22"/>
+            <line x1="48" y1="50" x2="36" y2="38"/>
+            <line x1="112" y1="50" x2="124" y2="38"/>
+            <line x1="22" y1="76" x2="6" y2="76"/>
+            <line x1="138" y1="76" x2="154" y2="76"/>
+          </g>
+        </svg>
+      </div>
+      <div class="role">Tier · Dawn · Architect</div>
+      <div class="name">Arun</div>
+      <div class="name-roman">অরুণ  ·  Dawn</div>
+      <div class="quote">“Slow on purpose. Thinks in spans, not lines — when stakes warrant the cost, calls Arun.”</div>
+      <div class="spec">
+        <b>Model</b> Opus 4.7<br>
+        <b>Best for</b> Plans, audits, architecture<br>
+        <b>Cost</b> ~$5 – $15 / mission
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<section class="pull">
+  <div></div>
+  <blockquote>
+    “A fleet of agents is only useful if it ships <span class="accent">real commits</span> under <span class="accent">real identity</span> against <span class="accent">real branches.</span>”
+    <div class="attrib">— The DevFleet Manifesto, §2</div>
+  </blockquote>
+  <div></div>
+</section>
+
+<section class="how">
+  <div class="how-head">
+    <div class="chapter">Chapter II · How a mission runs</div>
+    <h2>Three movements.</h2>
+  </div>
+  <div class="how-grid">
+    <div class="step">
+      <div class="num">i.</div>
+      <h3>Dispatch</h3>
+      <p>A mission lands in a lane. The watcher picks it up the moment its dependencies clear. Each agent gets its own git worktree, its own PAT, its own MCP context — no shared state, no stepping on toes.</p>
+    </div>
+    <div class="step">
+      <div class="num">ii.</div>
+      <h3>Coordinate</h3>
+      <p>Sub-missions spawn from the field. <code style="font-family: 'JetBrains Mono', monospace; font-size: 13px;">depends_on</code> chains keep them ordered. Failed deps no longer deadlock children — terminal states release the gate cleanly.</p>
+    </div>
+    <div class="step">
+      <div class="num">iii.</div>
+      <h3>Report</h3>
+      <p>Every agent files what it did, what's open, what's untested, what's next. The report becomes the prompt for the agent that follows. The trail is durable. The handoff is honest.</p>
+    </div>
+  </div>
+</section>
+
+<section class="spread">
+  <h2>Ship the <span class="crimson">fleet.</span></h2>
+  <div class="sub">Single operator · Multi-agent · Real production work</div>
+  <div class="cta">
+    <a href="#">Open Console</a>
+    <a href="#" class="ghost">Read the Manifesto</a>
+  </div>
+</section>
+
+<footer>
+  <span>© MMXXVI Farhan's DevFleet™</span>
+  <span>nexis365.com.au</span>
+  <span>Built in Sydney</span>
+</footer>
+
+</body>
+</html>

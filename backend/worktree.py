@@ -42,8 +42,16 @@ async def create_worktree(
     project_path: str,
     session_id: str,
     mission: dict | None = None,
+    git_identity: dict | None = None,
 ) -> tuple[str | None, str | None]:
-    """Create an isolated git worktree. Returns (worktree_path, branch_name) or (None, None)."""
+    """Create an isolated git worktree. Returns (worktree_path, branch_name) or (None, None).
+
+    If `git_identity` is provided as `{"login", "name", "noreply_email"}`, set
+    `git config user.name`/`user.email` inside the worktree so commits the
+    agent makes are attributed to the human operator (not the machine
+    default). Missing identity is non-fatal — git falls back to repo/global
+    config and the persona prompt will flag it.
+    """
     if not await is_git_repo(project_path):
         log.info("Project %s is not a git repo — skipping worktree isolation", project_path)
         return None, None
@@ -73,6 +81,45 @@ async def create_worktree(
         return None, None
 
     log.info("Created worktree at %s on branch %s", worktree_path, branch_name)
+
+    # Per-user git author identity. Scoped to the worktree (not --global) so
+    # other repos on this machine keep their own configured author. Failure is
+    # non-fatal: git will fall back to repo/global config.
+    if git_identity:
+        gi_name = (git_identity.get("name") or git_identity.get("login") or "").strip()
+        gi_email = (git_identity.get("noreply_email") or "").strip()
+        if gi_name:
+            code, _, gerr = await _run(
+                ["git", "config", "user.name", gi_name], worktree_path
+            )
+            if code != 0:
+                log.warning("git config user.name failed: %s", gerr)
+        if gi_email:
+            code, _, gerr = await _run(
+                ["git", "config", "user.email", gi_email], worktree_path
+            )
+            if code != 0:
+                log.warning("git config user.email failed: %s", gerr)
+        if gi_name and gi_email:
+            log.info(
+                "Worktree git identity set: %s <%s>", gi_name, gi_email
+            )
+
+        # Credential helper for HTTPS remotes. SSH remotes ignore this entirely.
+        # GH_TOKEN is read from the agent process env at the moment `git push`
+        # runs — set by sdk_engine when dispatching with a per-user PAT.
+        # Scoped to https://github.com so other helpers (e.g. macOS keychain
+        # for unrelated hosts) keep working.
+        _, _, _ = await _run(
+            ["git", "config", "--local", "credential.https://github.com.helper", ""],
+            worktree_path,
+        )
+        await _run(
+            ["git", "config", "--local", "--add",
+             "credential.https://github.com.helper",
+             "!f() { echo username=x-access-token; echo \"password=${GH_TOKEN:-}\"; }; f"],
+            worktree_path,
+        )
 
     # Pre-warm node_modules so the agent doesn't OOM during install inside the session.
     # pnpm install runs here (pre-agent) where a failure is cheap and clearly scoped.

@@ -1,10 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getMission, updateMission, dispatchMission, deleteMission, generateNextMission, resumeMission, startMissionRemoteControl, stopRemoteControl, listSessions, getMissionEvents, setMissionSchedule, removeMissionSchedule, getSystemFeatures } from '../api/client';
+import { useFleetEvents } from '../hooks/useFleetEvents';
 import StatusBadge from '../components/StatusBadge';
 import PromptEditor from '../components/PromptEditor';
 import ReportView from '../components/ReportView';
 import DispatchPanel from '../components/DispatchPanel';
 import RemoteControlModal from '../components/RemoteControlModal';
+import { Switch, LED } from '../components/hw';
+
+const MISSION_STATE_EVENTS = new Set([
+  'mission_dispatched',
+  'mission_completed',
+  'mission_failed',
+  'mission_cancelled',
+  'mission_cancelled_no_approval',
+  'hitl_question',
+]);
 
 function timeAgo(dateStr) {
   if (!dateStr) return '';
@@ -67,18 +78,29 @@ export default function MissionDetail({ id, navigate }) {
     }
   };
 
+  // Initial fetch + 60s safety reload. Once the mission lands in a terminal
+  // state we stop the safety timer entirely — no more events are coming, and
+  // the user can hit refresh if they need to re-pull notes.
   useEffect(() => {
     terminalRef.current = false;
     load();
-    const interval = setInterval(() => {
+    const safety = setInterval(() => {
       if (terminalRef.current) {
-        clearInterval(interval);
+        clearInterval(safety);
         return;
       }
       load();
-    }, 4000);
-    return () => clearInterval(interval);
+    }, 60000);
+    return () => clearInterval(safety);
   }, [id]);
+
+  // SSE-driven refresh — only fires for events on THIS mission.
+  useFleetEvents((evt) => {
+    if (terminalRef.current) return;
+    if (String(evt.mission_id) !== String(id)) return;
+    if (!MISSION_STATE_EVENTS.has(evt.type)) return;
+    load();
+  });
 
   useEffect(() => {
     getSystemFeatures().then(features => {
@@ -606,30 +628,19 @@ function AutomationPanel({ mission, editing, onUpdate, setError }) {
           </div>
         </div>
         {editing && (
-          <label style={{ position: 'relative', width: 44, height: 24, cursor: 'pointer', flexShrink: 0 }}>
-            <input type="checkbox" checked={mission.auto_dispatch === 1} onChange={handleToggleAutoDispatch}
-              style={{ position: 'absolute', opacity: 0, width: 0, height: 0 }} />
-            <span style={{
-              position: 'absolute', inset: 0, borderRadius: 12,
-              background: mission.auto_dispatch === 1 ? 'var(--success)' : 'var(--bg-input)',
-              border: '1px solid ' + (mission.auto_dispatch === 1 ? 'var(--success)' : 'var(--border)'),
-              transition: 'all 0.2s',
-            }}>
-              <span style={{
-                position: 'absolute', top: 2, left: mission.auto_dispatch === 1 ? 22 : 2,
-                width: 18, height: 18, borderRadius: '50%', background: 'white',
-                transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
-              }} />
-            </span>
-          </label>
+          <Switch
+            checked={mission.auto_dispatch === 1}
+            onChange={handleToggleAutoDispatch}
+            tone="g"
+            ariaLabel="Auto-dispatch"
+          />
         )}
         {!editing && (
-          <span style={{
-            fontSize: 10, fontWeight: 700, padding: '2px 8px',
-            background: hasAutoDeps ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
-            color: hasAutoDeps ? 'var(--success)' : 'var(--danger)',
-            borderRadius: 'var(--radius-full)',
-          }}>{hasAutoDeps ? 'ON' : 'OFF'}</span>
+          <LED
+            tone={hasAutoDeps ? 'g' : 'off'}
+            label={hasAutoDeps ? 'ON' : 'OFF'}
+            size="sm"
+          />
         )}
       </div>
 

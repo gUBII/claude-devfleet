@@ -1,7 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { getDashboardStats } from '../api/client';
+import { useFleetEvents } from '../hooks/useFleetEvents';
 import { useAuth } from '../auth';
 import ChangePassword from './ChangePassword';
+import BrandMark from './BrandMark';
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1' },
@@ -11,6 +13,7 @@ const NAV = [
   { id: 'integrations', label: 'Integrations', icon: 'M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5' },
   { id: 'fleet-config', label: 'Fleet Config', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z' },
   { id: 'prompt-studio', label: 'Prompt Studio', icon: 'M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z' },
+  { id: 'dev-profiles', label: 'Dev Profiles', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' },
 ];
 
 export default function Sidebar({ activePage, navigate, agentDelta = 0 }) {
@@ -19,17 +22,30 @@ export default function Sidebar({ activePage, navigate, agentDelta = 0 }) {
   const [showChangePw, setShowChangePw] = useState(false);
   const prevDelta = useRef(0);
 
-  useEffect(() => {
-    const poll = async () => {
-      try {
-        const stats = await getDashboardStats();
-        setRunningAgents(stats.running_agents || 0);
-      } catch {}
-    };
-    poll();
-    const id = setInterval(poll, 5000);
-    return () => clearInterval(id);
+  const refresh = useCallback(async () => {
+    try {
+      const stats = await getDashboardStats();
+      setRunningAgents(stats.running_agents || 0);
+    } catch {}
   }, []);
+
+  // Initial hydrate only. With --workers 1, fleet_bus is authoritative —
+  // no safety-net poll needed; mission_* events drive every refresh.
+  useEffect(() => { refresh(); }, [refresh]);
+
+  useFleetEvents((evt) => {
+    switch (evt.type) {
+      case 'mission_dispatched':
+      case 'mission_completed':
+      case 'mission_failed':
+      case 'mission_cancelled':
+      case 'mission_cancelled_no_approval':
+        refresh();
+        break;
+      default:
+        break;
+    }
+  });
 
   useEffect(() => {
     const diff = agentDelta - prevDelta.current;
@@ -44,9 +60,8 @@ export default function Sidebar({ activePage, navigate, agentDelta = 0 }) {
   return (
     <aside className="sidebar">
       <div className="sidebar-logo">
-        <h1>Nexis365 <span className="logo-gradient">DevFleet</span><sup style={{fontSize:'0.45em',marginLeft:3,opacity:0.6,verticalAlign:'super'}}>™</sup></h1>
-        <p style={{fontSize:11,opacity:0.45,fontStyle:'italic',marginTop:3,marginBottom:2}}>v2026.05</p>
-        <p className="powered-by">Powered by Claude Code</p>
+        <BrandMark size="sm" />
+        <p className="sidebar-logo__meta">v2026.05  ·  Workstation</p>
       </div>
 
       <nav className="sidebar-nav">

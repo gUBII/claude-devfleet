@@ -20,7 +20,7 @@ from models import (ProjectCreate, ProjectUpdate, MissionCreate, MissionUpdate,
                     McpServerCreate, CeilingUpdate,
                     HitlAskRequest, HitlReply, ProjectChatRequest,
                     GitHubTokenSet, UserPermissionGrant, CHAT_PERMISSIONS,
-                    ChangePasswordRequest)
+                    ChangePasswordRequest, LaneCreate, LaneUpdate)
 import health_checker
 import mission_watcher
 import scheduler
@@ -111,7 +111,7 @@ async def lifespan(app):
     # Load plugins (custom tools, hooks, extensions)
     from plugins import load_plugins
     load_plugins()
-    log.info("Claude DevFleet API started — DB initialized at %s (engine: %s)", db.DB_PATH, log_engine)
+    log.info("Farhan's DevFleet™ API started — DB initialized at %s (engine: %s)", db.DB_PATH, log_engine)
     yield
     await scheduler.stop_scheduler()
     await mission_watcher.stop_watcher()
@@ -119,10 +119,10 @@ async def lifespan(app):
     for sid, task in list(running_tasks.items()):
         task.cancel()
     await cleanup_remote()
-    log.info("Claude DevFleet API shutting down")
+    log.info("Farhan's DevFleet™ API shutting down")
 
 
-app = FastAPI(title="Claude DevFleet API", lifespan=lifespan)
+app = FastAPI(title="Farhan's DevFleet™ API", lifespan=lifespan)
 
 _ALLOWED_ORIGINS = [
     o.strip() for o in
@@ -158,9 +158,15 @@ app.add_middleware(SecurityHeadersMiddleware)
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: _StarletteRequest, call_next):
         request.state.user = None
+        token = None
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[7:]
+        if not token:
+            # Browser EventSource cannot set custom headers — accept ?token= query param
+            # so SSE endpoints (/api/events, /api/sessions/{sid}/stream) work in browsers.
+            token = request.query_params.get("token", "")
+        if token:
             try:
                 from auth import decode_token
                 request.state.user = decode_token(token)
@@ -333,6 +339,69 @@ def _check_mcp_request(request) -> tuple[bool, str]:
     return True, ""
 
 
+async def _buffer_asgi_body(receive):
+    """Drain the ASGI request body once and return (body_bytes, replay_receive)."""
+    chunks: list[bytes] = []
+    more = True
+    while more:
+        msg = await receive()
+        if msg["type"] != "http.request":
+            # Disconnect or non-body — just stop draining.
+            break
+        chunks.append(msg.get("body", b""))
+        more = msg.get("more_body", False)
+    body = b"".join(chunks)
+
+    delivered = False
+
+    async def replay():
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        # Subsequent calls — block on the original receive (disconnect signals etc.)
+        return await receive()
+
+    return body, replay
+
+
+def _log_mcp_post(session_id: str, body: bytes) -> None:
+    """One-line correlation log for every POST to /mcp.
+
+    Library swallows validation errors with `-32602 / data: ""` (see
+    mcp/shared/session.py). When that happens the only way to root-cause is
+    matching server logs to the failing request — so we always log the
+    JSON-RPC id, method, and a clipped preview here.
+
+    The preview is the first 400 bytes of the JSON body — that includes
+    prompt content, paths, and IDs. Treat /mcp request logs as sensitive
+    alongside everything else the agents see.
+    """
+    if not body:
+        log.info("MCP POST session=%s EMPTY body", session_id)
+        return
+    preview = body[:400].decode("utf-8", errors="replace")
+    method = "?"
+    msg_id = "?"
+    body_len = len(body)
+    try:
+        parsed = json.loads(body)
+        if isinstance(parsed, dict):
+            method = str(parsed.get("method", "?"))
+            msg_id = str(parsed.get("id", "?"))
+            params = parsed.get("params") or {}
+            if isinstance(params, dict):
+                tool = params.get("name")
+                if tool:
+                    method = f"{method}:{tool}"
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    log.info(
+        "MCP POST session=%s id=%s method=%s bytes=%d preview=%s",
+        session_id, msg_id, method, body_len, preview,
+    )
+
+
 class _McpHttpEndpoint:
     """Streamable HTTP MCP endpoint — handles GET, POST, DELETE on /mcp."""
 
@@ -362,7 +431,15 @@ class _McpHttpEndpoint:
         if not session_id:
             session_id = str(_uuid.uuid4())
         transport = await _ensure_http_transport(session_id)
-        await transport.handle_request(scope, receive, send)
+
+        if request.method == "POST":
+            # Buffer body so we can log it for -32602 root-causing without
+            # consuming the stream from the downstream transport.
+            body, replay = await _buffer_asgi_body(receive)
+            _log_mcp_post(session_id, body)
+            await transport.handle_request(scope, replay, send)
+        else:
+            await transport.handle_request(scope, receive, send)
 
 
 _mcp_http_endpoint = _McpHttpEndpoint()
@@ -462,6 +539,58 @@ async def auth_list_users(request: Request):
         return [dict(r) for r in rows]
     finally:
         await conn.close()
+
+
+# ──────────────────────────────────────────────
+# Dev Profiles — public leaderboard
+# ──────────────────────────────────────────────
+
+
+def _derive_avatar_url(noreply_email: str) -> str:
+    """GitHub avatar from the numeric-ID prefix of a noreply email.
+
+    Format: `<id>+<login>@users.noreply.github.com` → `avatars/u/<id>`.
+    Empty / malformed input returns empty string; frontend falls back to
+    an initials placeholder.
+    """
+    if not noreply_email or "+" not in noreply_email:
+        return ""
+    prefix = noreply_email.split("+", 1)[0]
+    if not prefix.isdigit():
+        return ""
+    return f"https://avatars.githubusercontent.com/u/{prefix}"
+
+
+@app.get("/api/dev-profiles")
+async def list_dev_profiles(request: Request):
+    """Public leaderboard of non-admin devs and their dev_metrics.
+
+    Any authenticated user can read this — admins included, but admin rows
+    are NEVER in the response (see dev_metrics.list_public_profiles). The
+    intent is gentle social pressure on dev behaviour; admins opting out
+    is a product constraint, not a privacy one.
+    """
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    import dev_metrics
+    rows = await dev_metrics.list_public_profiles()
+    out = []
+    for r in rows:
+        out.append({
+            "user_id": r["id"],
+            "email": r["email"],
+            "github_login": r["github_login"],
+            "github_name": r["github_name"],
+            "avatar_url": _derive_avatar_url(r["github_noreply_email"]),
+            "likeness_points": r["likeness_points"],
+            "pr_merges_clean": r["pr_merges_clean"],
+            "pr_merges_total": r["pr_merges_total"],
+            "dollars_saved_routing": round(r["dollars_saved_routing"], 2),
+            "current_clean_streak": r["current_clean_streak"],
+            "longest_clean_streak": r["longest_clean_streak"],
+        })
+    return out
 
 
 # ──────────────────────────────────────────────
@@ -567,9 +696,9 @@ async def hitl_ask(sid: str, body: HitlAskRequest, request: Request):
                 mission_id = row[0]["mission_id"]
             if mission_id:
                 await conn.execute(
-                    "INSERT INTO mission_events (id, mission_id, event_type, data, created_at) "
-                    "VALUES (?, ?, 'hitl_timeout_cancelled', ?, datetime('now'))",
-                    (str(uuid.uuid4()), mission_id, json.dumps({"session_id": sid, "question": body.question})),
+                    "INSERT INTO mission_events (mission_id, event_type, data, created_at) "
+                    "VALUES (?, 'hitl_timeout_cancelled', ?, datetime('now'))",
+                    (mission_id, json.dumps({"session_id": sid, "question": body.question})),
                 )
             await conn.commit()
         finally:
@@ -738,9 +867,13 @@ async def get_bot_history(pid: str, request: Request):
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall(
-            "SELECT id, role, content, created_at, is_plan, plan_title, persona, "
-            "handoff_session_id "
-            "FROM project_bot_history WHERE project_id=? ORDER BY created_at ASC LIMIT 100",
+            "SELECT h.id, h.role, h.content, h.created_at, h.is_plan, h.plan_title, "
+            "h.persona, h.handoff_session_id, h.user_id, "
+            "COALESCE(u.email, '') AS user_email, "
+            "COALESCE(u.github_login, '') AS github_login "
+            "FROM project_bot_history h "
+            "LEFT JOIN users u ON u.id = h.user_id "
+            "WHERE h.project_id=? ORDER BY h.created_at ASC LIMIT 100",
             (pid,),
         )
         return [dict(r) for r in rows]
@@ -854,7 +987,7 @@ async def print_plan(pid: str, hid: int, request: Request, token: str | None = N
 <main>
 {body_html}
 </main>
-<footer>Generated by Moofasa, Nexis365 DevFleet assistant. Press ⌘P to save as PDF.</footer>
+<footer>Powered by Farhan's DevFleet™ · nexis365.com.au · Press ⌘P to save as PDF.</footer>
 </body>
 </html>"""
     return HTMLResponse(content=html)
@@ -1138,39 +1271,41 @@ async def list_missions(
 ):
     conn = await db.get_db()
     try:
-        query = """SELECT m.*, p.name AS project_name
-                   FROM missions m
-                   JOIN projects p ON p.id = m.project_id
-                   WHERE 1=1"""
-        params = []
+        base = """FROM missions m
+                  JOIN projects p ON p.id = m.project_id
+                  WHERE 1=1"""
+        params: list = []
         # Hide synthetic chat-turn missions by default — they belong to the
         # chat surface, not the operator mission board. Opt back in with
         # `?include_chat_turns=true` (used by audit/debugging tooling).
         if not include_chat_turns:
-            query += " AND COALESCE(m.is_chat_turn, 0) = 0"
+            base += " AND COALESCE(m.is_chat_turn, 0) = 0"
         if project_id:
-            query += " AND m.project_id=?"
+            base += " AND m.project_id=?"
             params.append(project_id)
         if status:
-            query += " AND m.status=?"
+            base += " AND m.status=?"
             params.append(status)
         if parent_mission_id:
-            query += " AND m.parent_mission_id=?"
+            base += " AND m.parent_mission_id=?"
             params.append(parent_mission_id)
-        query += " ORDER BY m.priority DESC, m.created_at DESC"
-        rows = await conn.execute_fetchall(query, params)
-        # Tag filter is applied in Python because tags are stored as JSON text;
-        # LIMIT/OFFSET therefore slice the filtered list rather than the raw SQL result.
-        results = []
-        for r in rows:
-            d = dict(r)
-            if tag:
-                tags = json.loads(d.get("tags", "[]"))
-                if tag not in tags:
-                    continue
-            results.append(d)
-        response.headers["X-Total-Count"] = str(len(results))
-        return results[offset:offset + limit]
+        if tag:
+            # Push tag filter into SQL via json_each so LIMIT/OFFSET operate on
+            # the filtered set rather than the raw full table.
+            base += " AND EXISTS (SELECT 1 FROM json_each(m.tags) t WHERE t.value=?)"
+            params.append(tag)
+
+        # Total count (for pagination headers) — separate cheap query before LIMIT
+        count_rows = await conn.execute_fetchall(f"SELECT COUNT(*) AS n {base}", params)
+        total = count_rows[0]["n"] if count_rows else 0
+        response.headers["X-Total-Count"] = str(total)
+
+        rows = await conn.execute_fetchall(
+            f"SELECT m.*, p.name AS project_name {base}"
+            " ORDER BY m.priority DESC, m.created_at DESC LIMIT ? OFFSET ?",
+            params + [limit, offset],
+        )
+        return [dict(r) for r in rows]
     finally:
         await conn.close()
 
@@ -1334,7 +1469,10 @@ async def delete_mission(mid: str):
 # ──────────────────────────────────────────────
 
 @app.post("/api/missions/{mid}/generate-next")
-async def generate_next_mission(mid: str):
+async def generate_next_mission(mid: str, request: Request):
+    _gen_user = getattr(request.state, "user", None)
+    if not _gen_user:
+        raise HTTPException(401, "Authentication required")
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall(
@@ -1404,13 +1542,23 @@ async def generate_next_mission(mid: str):
             (mission["project_id"],),
         )
         next_num = num_rows[0][0] if num_rows else 1
+        parent_model = mission.get("model") or "claude-sonnet-4-6"
+        parent_lane = mission.get("lane") or ""
+        from models import MISSION_TYPE_TO_LANE
+        parent_mission_type = mission.get("mission_type") or "implement"
+        if not parent_lane:
+            parent_lane = MISSION_TYPE_TO_LANE.get(parent_mission_type, "")
         await conn.execute(
-            """INSERT INTO missions (id, project_id, title, detailed_prompt, acceptance_criteria, priority, tags, mission_number)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO missions (id, project_id, title, detailed_prompt, acceptance_criteria,
+                                    priority, tags, mission_number, model, lane, mission_type,
+                                    created_by_email, created_by_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (new_id, mission["project_id"], new_title,
              "\n".join(prompt_parts),
              "\n".join(criteria_parts) if criteria_parts else "",
-             mission.get("priority", 0), tags, next_num),
+             mission.get("priority", 0), tags, next_num,
+             parent_model, parent_lane, parent_mission_type,
+             _gen_user.get("email", ""), _gen_user.get("email", "").split("@")[0]),
         )
         await conn.commit()
 
@@ -1470,6 +1618,50 @@ async def run_lane_critique_batch():
     return {"status": "started", "message": "Opus critique batch running in background (~30s)"}
 
 
+@app.post("/api/lanes")
+async def create_lane_endpoint(body: LaneCreate, request: Request):
+    """Create a user-defined lane. Built-in lane names are rejected (use PUT
+    to edit those). Any authenticated user can add a lane — consistent with
+    Prompt Studio, which lets non-admins edit lane prompts without a role
+    check. Built-in protection lives at the lanes layer, not here.
+
+    Bad input (e.g. max_agents as a string) gets a 422 from Pydantic before
+    we reach the handler — no more silent 500s from int() coercion."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    from lanes import create_lane, LaneValidationError
+    try:
+        return await create_lane(
+            name=body.name,
+            icon=body.icon,
+            max_agents=body.max_agents,
+            default_model=body.default_model,
+            tool_preset=body.tool_preset,
+            color=body.color,
+        )
+    except LaneValidationError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.delete("/api/lanes/{name}")
+async def delete_lane_endpoint(name: str, request: Request):
+    """Delete a user-created lane. Built-ins are protected at the lanes
+    layer (delete_lane refuses any name in LANE_DEFAULTS and any row with
+    user_created=0). Auth required, no role check — anyone who can create
+    a lane can also delete the one they created."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    from lanes import delete_lane
+    ok, reason = await delete_lane(name)
+    if not ok:
+        # 409 for protected built-ins, 404 for missing, both convey "no"
+        # without claiming server fault.
+        raise HTTPException(409 if "built-in" in reason else 404, reason)
+    return {"status": "deleted", "name": name}
+
+
 @app.get("/api/lanes/{name}")
 async def get_lane(name: str):
     from lanes import get_one_lane
@@ -1480,13 +1672,17 @@ async def get_lane(name: str):
 
 
 @app.put("/api/lanes/{name}")
-async def update_lane_endpoint(name: str, body: dict):
+async def update_lane_endpoint(name: str, body: LaneUpdate, request: Request):
+    _lane_user = getattr(request.state, "user", None)
+    if not _lane_user:
+        raise HTTPException(401, "Authentication required")
     from lanes import update_lane, get_one_lane
     existing = await get_one_lane(name)
     if not existing:
         raise HTTPException(404, f"Lane '{name}' not found")
-    allowed = {"max_agents", "default_model", "tool_preset", "append_prompt", "color", "icon", "enabled"}
-    patch = {k: v for k, v in body.items() if k in allowed}
+    # Only forward fields the client actually set — preserves PATCH semantics
+    # over the partial-Optional LaneUpdate model.
+    patch = body.model_dump(exclude_unset=True)
     updated = await update_lane(name, patch)
     return updated
 
@@ -1575,6 +1771,9 @@ async def fleet_summary():
 
 @app.post("/api/missions/{mid}/dispatch")
 async def dispatch(request: Request, mid: str, body: DispatchOptions | None = None):
+    _dispatch_caller = getattr(request.state, "user", None)
+    if not _dispatch_caller:
+        raise HTTPException(401, "Authentication required")
     running_count = sum(1 for t in running_tasks.values() if not t.done())
     if MAX_CONCURRENT_AGENTS > 0 and running_count >= MAX_CONCURRENT_AGENTS:
         raise HTTPException(429, f"Global agent ceiling reached ({running_count}/{MAX_CONCURRENT_AGENTS}) — wait for a slot")
@@ -1618,15 +1817,14 @@ async def dispatch(request: Request, mid: str, body: DispatchOptions | None = No
     finally:
         await conn.close()
 
-    # Look up calling user's GitHub token (if they have one stored)
+    # Look up calling user's GitHub token (Fernet-decrypted — never read the legacy plaintext column)
     _dispatch_user = getattr(request.state, "user", None)
     _github_token = None
     if _dispatch_user:
-        _gh_rows = await (await (await db.get_db()).execute(
-            "SELECT github_token FROM users WHERE id=?", (_dispatch_user.get("sub"),)
-        )).fetchone()
-        if _gh_rows and _gh_rows[0]:
-            _github_token = _gh_rows[0]
+        import auth as _auth_mod
+        _gh_result = await _auth_mod.get_github_token(_dispatch_user.get("sub"))
+        if _gh_result:
+            _github_token = _gh_result[0]  # tuple: (token, github_username)
 
     task = asyncio.create_task(
         dispatch_mission(session_id, mission, last_report, opts=body, github_token=_github_token)
@@ -1872,7 +2070,10 @@ async def get_session(sid: str):
 
 
 @app.get("/api/sessions/{sid}/stream")
-async def stream_session(sid: str):
+async def stream_session(sid: str, request: Request):
+    _stream_user = getattr(request.state, "user", None)
+    if not _stream_user:
+        raise HTTPException(401, "Authentication required")
     if USE_SDK_ENGINE:
         from sdk_engine import subscribe_session
     else:
@@ -1886,7 +2087,10 @@ async def stream_session(sid: str):
 
 
 @app.post("/api/sessions/{sid}/cancel")
-async def cancel(sid: str):
+async def cancel(sid: str, request: Request):
+    _cancel_user = getattr(request.state, "user", None)
+    if not _cancel_user:
+        raise HTTPException(401, "Authentication required")
     result = await cancel_session(sid)
     if not result:
         raise HTTPException(404, "Session not running")
@@ -2069,7 +2273,7 @@ class PlanRequest(BaseModel):
     project_path: str | None = None  # auto-generate if not provided
 
 @app.post("/api/plan", status_code=201)
-async def api_plan_project(body: PlanRequest):
+async def api_plan_project(body: PlanRequest, request: Request):
     """Take a natural language prompt, plan a project with chained missions."""
     # Auto-generate project path if not provided
     project_path = body.project_path
@@ -2101,6 +2305,20 @@ async def api_plan_project(body: PlanRequest):
             await conn.commit()
         finally:
             await conn.close()
+
+        # Credit the authenticated dev with routing savings (Feature 2 + 1).
+        # No-op for unauth requests (legacy callers), admins, or zero savings.
+        routing = result.get("model_routing")
+        saved = (routing or {}).get("dollars_saved_vs_sonnet", 0) or 0
+        if saved > 0:
+            jwt_user = getattr(request.state, "user", None)
+            user_id = jwt_user.get("sub") if jwt_user else None
+            if user_id:
+                try:
+                    import dev_metrics
+                    await dev_metrics.record_routing_savings(user_id, saved)
+                except Exception:
+                    log.exception("Failed to credit routing savings for %s", user_id)
         return result
     except ValueError as e:
         raise HTTPException(422, str(e))
@@ -2126,8 +2344,13 @@ class PlanIntelligentRequest(BaseModel):
 
 
 @app.post("/api/plan-intelligent", status_code=201)
-async def api_plan_intelligent(body: PlanIntelligentRequest):
-    """Enhanced project planner using extended thinking for better mission breaking."""
+async def api_plan_intelligent(body: PlanIntelligentRequest, response: Response):
+    """Enhanced project planner using extended thinking for better mission breaking.
+
+    DEPRECATED — use POST /api/plan instead. This endpoint is retained for
+    backward compatibility and will be removed 2026-09-01.
+    """
+    response.headers["X-Deprecated"] = "use /api/plan instead; removal 2026-09-01"
     project_path = body.project_path
     if not project_path:
         import re
@@ -2549,8 +2772,11 @@ async def list_remote():
 
 
 @app.get("/api/sessions/{sid}/remote-stream")
-async def stream_remote(sid: str):
+async def stream_remote(sid: str, request: Request):
     """SSE stream of live remote-control process output."""
+    _rs_user = getattr(request.state, "user", None)
+    if not _rs_user:
+        raise HTTPException(401, "Authentication required")
     if not ENABLE_REMOTE_CONTROL:
         raise HTTPException(501, "Remote control is not enabled")
     async def event_stream():
@@ -2689,6 +2915,10 @@ async def get_status_page(project_id: str = Query(None)):
                 "SELECT * FROM monitored_services ORDER BY group_name, name"
             )
 
+        # Batch-fetch status for all services in 5 queries instead of N * 5
+        service_ids = [r["id"] for r in services]
+        status_bulk = await health_checker.get_service_status_bulk(service_ids)
+
         groups = {}
         total = 0
         up_count = 0
@@ -2697,9 +2927,8 @@ async def get_status_page(project_id: str = Query(None)):
 
         for row in services:
             svc = dict(row)
-            status_data = await health_checker.get_service_status(svc["id"])
+            svc.update(status_bulk.get(svc["id"], {"status": "unknown"}))
             uptime_bars = await health_checker.get_uptime_bars(svc["id"])
-            svc.update(status_data)
             svc["uptime_bars"] = uptime_bars
 
             group = svc.get("group_name") or "Default"
@@ -2922,7 +3151,10 @@ async def list_mcp_servers(pid: str):
 
 
 @app.post("/api/projects/{pid}/mcp-servers", status_code=201)
-async def add_mcp_server(pid: str, body: McpServerCreate):
+async def add_mcp_server(pid: str, body: McpServerCreate, request: Request):
+    _mcp_user = getattr(request.state, "user", None)
+    if not _mcp_user:
+        raise HTTPException(401, "Authentication required")
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall("SELECT id FROM projects WHERE id=?", (pid,))
@@ -2944,7 +3176,10 @@ async def add_mcp_server(pid: str, body: McpServerCreate):
 
 
 @app.delete("/api/mcp-servers/{mid}", status_code=204)
-async def delete_mcp_server(mid: str):
+async def delete_mcp_server(mid: str, request: Request):
+    _mcp_user = getattr(request.state, "user", None)
+    if not _mcp_user:
+        raise HTTPException(401, "Authentication required")
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall("SELECT * FROM mcp_configs WHERE id=?", (mid,))

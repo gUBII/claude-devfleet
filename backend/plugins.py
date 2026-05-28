@@ -1,5 +1,5 @@
 """
-Claude DevFleet Plugin System — Drop-in extensibility.
+Farhan's DevFleet™ Plugin System — Drop-in extensibility.
 
 Developers can extend DevFleet by:
 1. Dropping Python files into `plugins/` directory

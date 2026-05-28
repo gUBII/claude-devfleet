@@ -128,6 +128,7 @@ async def snapshot() -> list[dict]:
             "default_model": policy.get("default_model", "claude-sonnet-4-6"),
             "tool_preset": policy.get("tool_preset", "implement"),
             "enabled": bool(policy.get("enabled", 1)),
+            "user_created": bool(policy.get("user_created", 0)),
         })
     return sorted(result, key=lambda x: list(LANE_DEFAULTS.keys()).index(x["name"])
                   if x["name"] in LANE_DEFAULTS else 99)
@@ -248,3 +249,104 @@ async def update_lane(name: str, patch: dict) -> Optional[dict]:
         await conn.close()
     await reload_cache()
     return result
+
+
+# ─── User-created lanes (Fleet Config "+ New Lane") ───────────────────────
+
+
+import re as _re
+
+# Names must be lowercase + underscores only — same shape as built-in lanes
+# (coder, dynamic_tester, etc.) so the dispatcher/derive_lane logic stays
+# identical. Refusing dashes/spaces also keeps lane names URL-safe for the
+# /api/lanes/{name} routes.
+_LANE_NAME_RE = _re.compile(r"^[a-z][a-z0-9_]{1,30}$")
+
+
+class LaneValidationError(ValueError):
+    """Raised when a lane create request fails validation."""
+
+
+def _validate_lane_name(name: str) -> str:
+    name = (name or "").strip().lower()
+    if not _LANE_NAME_RE.match(name):
+        raise LaneValidationError(
+            "Lane name must be lowercase letters/digits/underscores, "
+            "start with a letter, 2–31 chars (e.g. 'docs_writer')."
+        )
+    if name in LANE_DEFAULTS:
+        raise LaneValidationError(
+            f"'{name}' is a built-in lane — pick a different name."
+        )
+    return name
+
+
+async def create_lane(
+    *,
+    name: str,
+    icon: str = "",
+    max_agents: int = 1,
+    default_model: str = "claude-sonnet-4-6",
+    tool_preset: str = "implement",
+    color: str = "#888888",
+) -> dict:
+    """Insert a user-created lane and warm cache. Raises LaneValidationError
+    on bad input or duplicate name (built-in or already-created)."""
+    name = _validate_lane_name(name)
+    if not isinstance(max_agents, int) or max_agents < 1 or max_agents > 50:
+        raise LaneValidationError("max_agents must be an int between 1 and 50.")
+
+    conn = await db.get_db()
+    try:
+        existing = await conn.execute_fetchall(
+            "SELECT name FROM lanes WHERE name = ?", (name,),
+        )
+        if existing:
+            raise LaneValidationError(
+                f"A lane named '{name}' already exists."
+            )
+        await conn.execute(
+            """INSERT INTO lanes
+               (name, max_agents, default_model, tool_preset, append_prompt,
+                color, icon, enabled, user_created)
+               VALUES (?, ?, ?, ?, '', ?, ?, 1, 1)""",
+            (name, max_agents, default_model, tool_preset, color, icon),
+        )
+        await conn.commit()
+        rows = await conn.execute_fetchall(
+            "SELECT * FROM lanes WHERE name = ?", (name,),
+        )
+        result = dict(rows[0])
+    finally:
+        await conn.close()
+    await reload_cache()
+    return result
+
+
+async def delete_lane(name: str) -> tuple[bool, str]:
+    """Delete a user-created lane. Built-ins are protected.
+
+    Returns (deleted, reason). reason is empty on success.
+    """
+    name = (name or "").strip().lower()
+    if name in LANE_DEFAULTS:
+        return False, f"'{name}' is a built-in lane and cannot be deleted."
+
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT user_created FROM lanes WHERE name = ?", (name,),
+        )
+        if not rows:
+            return False, f"Lane '{name}' not found."
+        if not dict(rows[0]).get("user_created"):
+            # Defence-in-depth: refuses to delete any lane the DB doesn't
+            # flag as user_created, even if it's somehow missing from
+            # LANE_DEFAULTS (e.g. mid-migration).
+            return False, f"'{name}' was not user-created and cannot be deleted."
+        await conn.execute("DELETE FROM lanes WHERE name = ?", (name,))
+        await conn.commit()
+    finally:
+        await conn.close()
+    await reload_cache()
+    return True, ""
