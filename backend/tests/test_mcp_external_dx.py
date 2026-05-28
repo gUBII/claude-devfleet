@@ -62,6 +62,7 @@ async def in_memory_db():
         "ALTER TABLE agent_sessions ADD COLUMN branch_name TEXT DEFAULT ''",
         "ALTER TABLE missions ADD COLUMN created_by_email TEXT DEFAULT ''",
         "ALTER TABLE missions ADD COLUMN created_by_name TEXT DEFAULT ''",
+        "ALTER TABLE missions ADD COLUMN skip_quality_gates INTEGER DEFAULT 0",
     ]
 
     for migration in migrations:

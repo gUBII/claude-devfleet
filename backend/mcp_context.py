@@ -14,6 +14,7 @@ Connects to the DevFleet API (localhost) to fetch context.
 
 import asyncio
 import json
+import logging
 import os
 import sys
 
@@ -30,16 +31,38 @@ SESSION_ID = os.environ.get("DEVFLEET_SESSION_ID", "")
 
 server = Server("devfleet-context")
 
+# stdio MCP server: stdout is the protocol channel, so logs MUST go to stderr.
+# logging's default last-resort handler writes to stderr — never use print().
+log = logging.getLogger("devfleet.mcp-context")
+
+# Shared HTTP client — reused across tool calls to avoid per-call connection
+# churn. Created lazily (binds to the running loop on first use), closed in main().
+_client: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient(timeout=10)
+    return _client
+
+
+async def _aclose_client() -> None:
+    global _client
+    if _client is not None:
+        await _client.aclose()
+        _client = None
+
 
 async def _api_get(path: str) -> dict | list | None:
-    """Call the DevFleet API."""
+    """Call the DevFleet API. Returns None on failure (logged, never silent)."""
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{DEVFLEET_API}{path}")
-            if resp.status_code == 200:
-                return resp.json()
-    except Exception:
-        pass
+        resp = await _get_client().get(f"{DEVFLEET_API}{path}")
+        if resp.status_code == 200:
+            return resp.json()
+        log.warning("context API GET %s -> HTTP %s", path, resp.status_code)
+    except Exception as e:
+        log.warning("context API GET %s failed: %s", path, e)
     return None
 
 
@@ -412,8 +435,11 @@ async def _get_fleet_shape() -> list[types.TextContent]:
 
 
 async def main():
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(read_stream, write_stream, server.create_initialization_options())
+    finally:
+        await _aclose_client()
 
 
 if __name__ == "__main__":

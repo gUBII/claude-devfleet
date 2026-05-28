@@ -13,6 +13,7 @@ Connects to the DevFleet API (localhost) to perform actions.
 
 import asyncio
 import json
+import logging
 import os
 
 import httpx
@@ -27,26 +28,51 @@ SESSION_ID = os.environ.get("DEVFLEET_SESSION_ID", "")
 
 server = Server("devfleet-tools")
 
+# stdio MCP server: stdout is the protocol channel, so logs MUST go to stderr.
+# logging's default last-resort handler writes to stderr — never use print().
+log = logging.getLogger("devfleet.mcp-tools")
+
+# Shared HTTP client — reused across tool calls to avoid per-call connection
+# churn. Created lazily (binds to the running loop on first use), closed in main().
+# Per-request timeout overrides the default where needed (e.g. the HITL long-poll).
+_client: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient(timeout=10)
+    return _client
+
+
+async def _aclose_client() -> None:
+    global _client
+    if _client is not None:
+        await _client.aclose()
+        _client = None
+
 
 async def _api_post(path: str, data: dict) -> dict | None:
+    """POST to the DevFleet API. Returns None on failure (logged, never silent)."""
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(f"{DEVFLEET_API}{path}", json=data)
-            if resp.status_code in (200, 201):
-                return resp.json()
-    except Exception:
-        pass
+        resp = await _get_client().post(f"{DEVFLEET_API}{path}", json=data)
+        if resp.status_code in (200, 201):
+            return resp.json()
+        log.warning("tools API POST %s -> HTTP %s", path, resp.status_code)
+    except Exception as e:
+        log.warning("tools API POST %s failed: %s", path, e)
     return None
 
 
 async def _api_get(path: str) -> dict | list | None:
+    """GET from the DevFleet API. Returns None on failure (logged, never silent)."""
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{DEVFLEET_API}{path}")
-            if resp.status_code == 200:
-                return resp.json()
-    except Exception:
-        pass
+        resp = await _get_client().get(f"{DEVFLEET_API}{path}")
+        if resp.status_code == 200:
+            return resp.json()
+        log.warning("tools API GET %s -> HTTP %s", path, resp.status_code)
+    except Exception as e:
+        log.warning("tools API GET %s failed: %s", path, e)
     return None
 
 
@@ -389,24 +415,25 @@ async def _ask_human(args: dict) -> list[types.TextContent]:
     question = args.get("question", "")
     options = args.get("options", [])
     try:
-        async with httpx.AsyncClient(timeout=620) as client:
-            resp = await client.post(
-                f"{DEVFLEET_API}/api/internal/sessions/{SESSION_ID}/hitl-ask",
-                json={"question": question, "options": options},
-            )
-            if resp.status_code == 200:
-                reply = resp.json().get("reply", "")
-                return [types.TextContent(type="text", text=f"Human replied: {reply}")]
-            if resp.status_code == 408:
-                # Server transitioned mission to cancelled_no_approval.
-                return [types.TextContent(
-                    type="text",
-                    text="HITL TIMEOUT: no human reply within 10 minutes. Mission has been CANCELLED by the server (status=cancelled_no_approval). Do not continue making changes. Surface this in your next report so the operator can re-dispatch.",
-                )]
+        # Long-poll overrides the shared client's default timeout (10s → 620s).
+        resp = await _get_client().post(
+            f"{DEVFLEET_API}/api/internal/sessions/{SESSION_ID}/hitl-ask",
+            json={"question": question, "options": options},
+            timeout=620,
+        )
+        if resp.status_code == 200:
+            reply = resp.json().get("reply", "")
+            return [types.TextContent(type="text", text=f"Human replied: {reply}")]
+        if resp.status_code == 408:
+            # Server transitioned mission to cancelled_no_approval.
             return [types.TextContent(
                 type="text",
-                text=f"HITL FAILED with status {resp.status_code}. Do not assume approval. Stop and surface this in your next report.",
+                text="HITL TIMEOUT: no human reply within 10 minutes. Mission has been CANCELLED by the server (status=cancelled_no_approval). Do not continue making changes. Surface this in your next report so the operator can re-dispatch.",
             )]
+        return [types.TextContent(
+            type="text",
+            text=f"HITL FAILED with status {resp.status_code}. Do not assume approval. Stop and surface this in your next report.",
+        )]
     except Exception as e:
         return [types.TextContent(
             type="text",
@@ -415,8 +442,11 @@ async def _ask_human(args: dict) -> list[types.TextContent]:
 
 
 async def main():
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(read_stream, write_stream, server.create_initialization_options())
+    finally:
+        await _aclose_client()
 
 
 if __name__ == "__main__":

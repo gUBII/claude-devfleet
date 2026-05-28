@@ -29,6 +29,30 @@ log = logging.getLogger("devfleet.mcp-external")
 server = Server("devfleet")
 
 
+# ── Structured error envelope ──
+# Unexpected tool failures surface a typed envelope instead of a bare
+# {"error": str(e)} so MCP clients can branch on a stable `code` and back off
+# on `retry_after_ms`. Codes: INVALID_PARAMS, RATE_LIMITED, INTERNAL,
+# SCOPE_DENIED. Successful results stay the raw handler dict (back-compat), and
+# the domain errors handlers return on purpose ({"error": ...}, {"state": ...})
+# are unchanged — only the exception path is wrapped here.
+
+def _error_envelope(code: str, message: str, retry_after_ms: int | None = None) -> dict:
+    return {
+        "ok": False,
+        "error": {"code": code, "message": message, "retry_after_ms": retry_after_ms},
+    }
+
+
+def _classify_exception(exc: Exception) -> dict:
+    if isinstance(exc, KeyError):
+        field = exc.args[0] if exc.args else "?"
+        return _error_envelope("INVALID_PARAMS", f"Missing required field: {field}")
+    if isinstance(exc, (ValueError, TypeError)):
+        return _error_envelope("INVALID_PARAMS", str(exc))
+    return _error_envelope("INTERNAL", str(exc))
+
+
 # Clients MUST send a fresh JSON-RPC `id` per request within a session.
 # Concurrent requests with the same id (e.g. a polling loop hardcoded to id=42
 # plus an interactive call) collide and the underlying MCP library responds
@@ -329,7 +353,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
     except Exception as e:
         log.exception(f"MCP tool {name} failed")
-        return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
+        return [types.TextContent(
+            type="text",
+            text=json.dumps(_classify_exception(e), indent=2, default=str),
+        )]
 
 
 async def _handle_tool(name: str, args: dict) -> dict:
