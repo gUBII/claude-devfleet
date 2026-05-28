@@ -29,13 +29,9 @@ export default function Sidebar({ activePage, navigate, agentDelta = 0 }) {
     } catch {}
   }, []);
 
-  // Initial hydrate + safety-net reload every 60s. The fast loop is now
-  // driven by SSE state-change events from /api/events.
-  useEffect(() => {
-    refresh();
-    const safety = setInterval(refresh, 60000);
-    return () => clearInterval(safety);
-  }, [refresh]);
+  // Initial hydrate only. With --workers 1, fleet_bus is authoritative —
+  // no safety-net poll needed; mission_* events drive every refresh.
+  useEffect(() => { refresh(); }, [refresh]);
 
   useFleetEvents((evt) => {
     switch (evt.type) {

@@ -84,16 +84,14 @@ export default function Dashboard({ navigate }) {
     }
   }, []);
 
-  // Initial hydrate + slow wall-clock tick. The dashboard now refreshes on
-  // SSE state-change events instead of a 5s HTTP poll. We still keep one
-  // safety-net reload every 60s so a missed event (reconnect gap, bus drop)
-  // can't leave the UI stale forever.
+  // Initial hydrate + wall-clock tick. The dashboard refreshes on SSE
+  // state-change events; with --workers 1, fleet_bus is authoritative and
+  // no safety-net poll is needed.
   useEffect(() => {
     tick();
     load();
     const clockTimer = setInterval(tick, 30000);
-    const safetyTimer = setInterval(load, 60000);
-    return () => { clearInterval(clockTimer); clearInterval(safetyTimer); };
+    return () => clearInterval(clockTimer);
   }, [load]);
 
   // Debounced reload — multiple events arriving within 250ms coalesce into a
