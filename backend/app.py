@@ -1511,6 +1511,12 @@ async def create_mission(request: Request, body: MissionCreate):
         rows = await conn.execute_fetchall("SELECT id FROM projects WHERE id=?", (body.project_id,))
         if not rows:
             raise HTTPException(404, "Project not found")
+        # Scope gate: an authenticated browser user must be bound to this project.
+        # Localhost bypass keeps agent self-service working — create_sub_mission
+        # posts here unauthenticated from the in-process stdio MCP server.
+        await _enforce_project_access(
+            request, body.project_id, allow_localhost=True, not_found_msg="Project not found"
+        )
         mid = str(uuid.uuid4())
         schedule_enabled = 1 if body.schedule_cron else 0
         # Get next mission number for this project
@@ -1993,6 +1999,12 @@ async def dispatch(request: Request, mid: str, body: DispatchOptions | None = No
         if not rows:
             raise HTTPException(404, "Mission not found")
         mission = dict(rows[0])
+        # Scope gate: only users bound to the mission's project may dispatch an
+        # agent into its repo. No localhost bypass — nothing internal hits this
+        # REST route (watcher / autoloop / MCP dispatch via in-process calls).
+        await _enforce_project_access(
+            request, mission["project_id"], allow_localhost=False, not_found_msg="Mission not found"
+        )
         if mission["status"] == "running":
             raise HTTPException(400, "Mission already running")
 
@@ -2543,55 +2555,10 @@ async def api_plan_project(body: PlanRequest, request: Request):
 # Project Intelligence — Vision, Analysis, Health, Visualization, Optimization
 # ──────────────────────────────────────────────
 
-from planner_v2 import plan_project_intelligent
 from project_analyzer import analyze_project_files
 from health_metrics import get_project_health
 from visualizer import generate_mission_graph, generate_project_summary_diagram
 from cost_optimizer import analyze_costs_and_optimize
-
-
-class PlanIntelligentRequest(BaseModel):
-    prompt: str
-    project_path: str | None = None
-
-
-@app.post("/api/plan-intelligent", status_code=201)
-async def api_plan_intelligent(body: PlanIntelligentRequest, response: Response):
-    """Enhanced project planner using extended thinking for better mission breaking.
-
-    DEPRECATED — use POST /api/plan instead. This endpoint is retained for
-    backward compatibility and will be removed 2026-09-01.
-    """
-    response.headers["X-Deprecated"] = "use /api/plan instead; removal 2026-09-01"
-    project_path = body.project_path
-    if not project_path:
-        import re
-        slug = re.sub(r'[^a-z0-9]+', '-', body.prompt.lower().strip())[:40].strip('-')
-        projects_base = os.environ.get("DEVFLEET_PROJECTS_DIR")
-        if not projects_base:
-            devfleet_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            projects_base = os.path.join(devfleet_root, "projects")
-        project_path = os.path.join(projects_base, slug)
-
-    resolved_path = resolve_path(project_path)
-
-    try:
-        result = await plan_project_intelligent(body.prompt, resolved_path)
-        host_path = reverse_path(resolved_path)
-        result["project"]["path"] = host_path
-        conn = await db.get_db()
-        try:
-            await conn.execute("UPDATE projects SET path = ? WHERE id = ?",
-                               (host_path, result["project"]["id"]))
-            await conn.commit()
-        finally:
-            await conn.close()
-        return result
-    except ValueError as e:
-        raise HTTPException(422, str(e))
-    except Exception as e:
-        log.exception("Intelligent planning failed")
-        raise HTTPException(500, "Planning failed")
 
 
 class AnalyzeProjectRequest(BaseModel):

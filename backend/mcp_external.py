@@ -23,6 +23,7 @@ from mcp.server import Server
 import mcp.types as types
 
 import db
+import mission_watcher
 
 log = logging.getLogger("devfleet.mcp-external")
 
@@ -630,6 +631,11 @@ async def _create_mission(args: dict, conn) -> dict:
         ),
     )
     await conn.commit()
+
+    # Nudge the watcher so an auto_dispatch mission created via MCP goes out
+    # sub-second instead of waiting for the fallback heartbeat — parity with the
+    # REST create path. No-op for auto_dispatch=0 or before the watcher starts.
+    mission_watcher.wake()
 
     return {
         "id": mid,
