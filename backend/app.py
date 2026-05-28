@@ -1344,7 +1344,7 @@ async def create_mission(request: Request, body: MissionCreate):
              body.allowed_tools or "", body.mission_type, lane,
              body.parent_mission_id, json.dumps(body.depends_on),
              1 if body.auto_dispatch else 0, body.schedule_cron, schedule_enabled,
-             next_num, _by_email, _by_name, body.status or "pending",
+             next_num, _by_email, _by_name, body.status or "draft",
              1 if body.skip_quality_gates else 0),
         )
         await conn.commit()
