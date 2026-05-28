@@ -82,21 +82,30 @@ async def create_worktree(
 
     log.info("Created worktree at %s on branch %s", worktree_path, branch_name)
 
-    # Per-user git author identity. Scoped to the worktree (not --global) so
-    # other repos on this machine keep their own configured author. Failure is
-    # non-fatal: git will fall back to repo/global config.
+    # Per-user git author identity + HTTPS credential helper, written to
+    # PER-WORKTREE config (`extensions.worktreeConfig` + `git config --worktree`)
+    # so they never leak into the shared common config. A plain `git config
+    # --local` from inside a worktree targets the SHARED config, which poisons
+    # the main checkout — e.g. the scheduler's `git fetch` inheriting a
+    # GH_TOKEN-based helper it can't satisfy, failing auth every cycle. Failure
+    # is non-fatal: git falls back to repo/global config.
     if git_identity:
+        # Enable per-worktree config before any --worktree write (idempotent;
+        # honored on git >= 2.20 regardless of core.repositoryformatversion).
+        await _run(
+            ["git", "config", "extensions.worktreeConfig", "true"], worktree_path
+        )
         gi_name = (git_identity.get("name") or git_identity.get("login") or "").strip()
         gi_email = (git_identity.get("noreply_email") or "").strip()
         if gi_name:
             code, _, gerr = await _run(
-                ["git", "config", "user.name", gi_name], worktree_path
+                ["git", "config", "--worktree", "user.name", gi_name], worktree_path
             )
             if code != 0:
                 log.warning("git config user.name failed: %s", gerr)
         if gi_email:
             code, _, gerr = await _run(
-                ["git", "config", "user.email", gi_email], worktree_path
+                ["git", "config", "--worktree", "user.email", gi_email], worktree_path
             )
             if code != 0:
                 log.warning("git config user.email failed: %s", gerr)
@@ -109,13 +118,14 @@ async def create_worktree(
         # GH_TOKEN is read from the agent process env at the moment `git push`
         # runs — set by sdk_engine when dispatching with a per-user PAT.
         # Scoped to https://github.com so other helpers (e.g. macOS keychain
-        # for unrelated hosts) keep working.
+        # for unrelated hosts) keep working. --worktree keeps it out of the
+        # shared config so the scheduler's main-checkout fetch is unaffected.
         _, _, _ = await _run(
-            ["git", "config", "--local", "credential.https://github.com.helper", ""],
+            ["git", "config", "--worktree", "credential.https://github.com.helper", ""],
             worktree_path,
         )
         await _run(
-            ["git", "config", "--local", "--add",
+            ["git", "config", "--worktree", "--add",
              "credential.https://github.com.helper",
              "!f() { echo username=x-access-token; echo \"password=${GH_TOKEN:-}\"; }; f"],
             worktree_path,
