@@ -1,9 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { listMissions, listProjects, createMission, reconcileMission } from '../api/client';
+import { listMissions, listProjects, createMission, reconcileMission, listLanes } from '../api/client';
 import MissionCard from '../components/MissionCard';
 import { Switch, Segment } from '../components/hw';
+import { modelBrand } from '../lib/modelBrand';
 
 const TABS = ['all', 'draft', 'queued', 'running', 'completed', 'failed', 'interrupted'];
+
+// "dynamic_tester" → "Dynamic Tester · Probaho · 2 slots"; "e2e"/"qa" → "E2E"/"QA"
+const LANE_ACRONYMS = new Set(['qa', 'ui', 'ux', 'api', 'db', 'ci', 'cd']);
+const laneName = (raw) =>
+  raw.split('_').map(w =>
+    (LANE_ACRONYMS.has(w) || /\d/.test(w)) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)
+  ).join(' ');
+const laneLabel = (l) =>
+  `${laneName(l.name)} · ${modelBrand(l.default_model)} · ${l.max_agents} slot${l.max_agents === 1 ? '' : 's'}`;
 
 export default function MissionBoard({ navigate }) {
   const [missions, setMissions] = useState([]);
@@ -11,7 +21,8 @@ export default function MissionBoard({ navigate }) {
   const [activeTab, setActiveTab] = useState('all');
   const [filterProject, setFilterProject] = useState('');
   const [showModal, setShowModal] = useState(false);
-  const [form, setForm] = useState({ project_id: '', title: '', detailed_prompt: '', acceptance_criteria: '', priority: 0, tags: '', model: 'claude-opus-4-7', mission_type: 'implement', auto_dispatch: false, schedule_cron: '', depends_on: '' });
+  const [lanes, setLanes] = useState([]);
+  const [form, setForm] = useState({ project_id: '', title: '', detailed_prompt: '', acceptance_criteria: '', priority: 0, tags: '', model: 'claude-opus-4-7', mission_type: 'implement', lane: '', auto_dispatch: false, schedule_cron: '', depends_on: '' });
   const [error, setError] = useState(null);
   const [reconcileToast, setReconcileToast] = useState(null);
 
@@ -26,6 +37,13 @@ export default function MissionBoard({ navigate }) {
   };
 
   useEffect(() => { load(); }, []);
+
+  // Lanes load independently — a lane-fetch failure must not blank the board.
+  useEffect(() => {
+    listLanes()
+      .then(l => setLanes((l || []).filter(x => x.enabled)))
+      .catch(() => {});
+  }, []);
 
   const filtered = missions.filter(m => {
     if (activeTab !== 'all' && m.status !== activeTab) return false;
@@ -79,13 +97,14 @@ export default function MissionBoard({ navigate }) {
         ...form,
         priority: Number(form.priority),
         tags,
+        lane: form.lane || null,
         auto_dispatch: form.auto_dispatch ? 1 : 0,
         schedule_cron: form.schedule_cron || null,
         depends_on,
       };
       delete payload.depends_on_text;
       await createMission(payload);
-      setForm({ project_id: '', title: '', detailed_prompt: '', acceptance_criteria: '', priority: 0, tags: '', model: 'claude-opus-4-7', mission_type: 'implement', auto_dispatch: false, schedule_cron: '', depends_on: '' });
+      setForm({ project_id: '', title: '', detailed_prompt: '', acceptance_criteria: '', priority: 0, tags: '', model: 'claude-opus-4-7', mission_type: 'implement', lane: '', auto_dispatch: false, schedule_cron: '', depends_on: '' });
       setShowModal(false);
       load();
     } catch (e) {
@@ -244,6 +263,22 @@ export default function MissionBoard({ navigate }) {
                       { value: 'fix',       label: 'Fix' },
                     ]}
                   />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">
+                    Lane <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>· role, prompt &amp; slot capacity</span>
+                  </label>
+                  <select
+                    className="form-select"
+                    value={form.lane}
+                    onChange={e => setForm({ ...form, lane: e.target.value })}
+                    aria-label="Lane"
+                  >
+                    <option value="">Auto (from mission type)</option>
+                    {lanes.map(l => (
+                      <option key={l.name} value={l.name}>{laneLabel(l)}</option>
+                    ))}
+                  </select>
                 </div>
               </div>
               <div className="flex gap-16">
