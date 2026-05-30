@@ -251,7 +251,8 @@ export const planProject = (prompt, projectPath) => request('/plan', {
 export const getPlugins = () => request('/plugins');
 
 // ── Lanes ──
-export const listLanes = () => request('/lanes');
+export const listLanes = (projectId) =>
+  request('/lanes' + (projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''));
 export const updateLane = (name, data) =>
   request(`/lanes/${name}`, { method: 'PUT', body: JSON.stringify(data) });
 export const createLane = (data) =>

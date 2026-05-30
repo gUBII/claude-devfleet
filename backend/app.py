@@ -1432,10 +1432,20 @@ async def delete_project(pid: str, request: Request):
         rows = await conn.execute_fetchall("SELECT * FROM projects WHERE id=?", (pid,))
         if not rows:
             raise HTTPException(404, "Project not found")
+        # Remove project-scoped lanes (user-created Workers owned by this project).
+        # Fresh DBs cascade via the FK; existing DBs lack it (column added by a
+        # plain ALTER), so delete explicitly. Built-ins are always global
+        # (project_id NULL) and never matched here.
+        await conn.execute(
+            "DELETE FROM lanes WHERE project_id=? AND user_created=1", (pid,)
+        )
         await conn.execute("DELETE FROM projects WHERE id=?", (pid,))
         await conn.commit()
     finally:
         await conn.close()
+    # Drop the removed project's lanes out of the in-memory cache immediately.
+    from lanes import reload_cache as _reload_lanes
+    await _reload_lanes()
 
 
 # ──────────────────────────────────────────────
@@ -1528,6 +1538,12 @@ async def create_mission(request: Request, body: MissionCreate):
         # Derive lane from mission_type if not explicitly provided
         from models import MISSION_TYPE_TO_LANE
         lane = body.lane or MISSION_TYPE_TO_LANE.get(body.mission_type, "coder")
+        # Scope gate: a project-owned lane can't be bound to another project's mission.
+        from lanes import assert_lane_in_scope, LaneValidationError as _LaneScopeErr
+        try:
+            await assert_lane_in_scope(lane, body.project_id)
+        except _LaneScopeErr as _exc:
+            raise HTTPException(400, str(_exc))
         # Capture authenticated user for attribution
         _user = getattr(request.state, "user", None)
         _by_email = _user.get("email", "") if _user else ""
@@ -1633,6 +1649,13 @@ async def update_mission(mid: str, body: MissionUpdate, request: Request):
         updates = body.model_dump(exclude_none=True)
         if not updates:
             return dict(rows[0])
+        # Scope gate: a lane change can't point at another project's lane.
+        if updates.get("lane"):
+            from lanes import assert_lane_in_scope, LaneValidationError as _LaneScopeErr
+            try:
+                await assert_lane_in_scope(updates["lane"], dict(rows[0])["project_id"])
+            except _LaneScopeErr as _exc:
+                raise HTTPException(400, str(_exc))
         if "tags" in updates:
             updates["tags"] = json.dumps(updates["tags"])
         if "depends_on" in updates:
@@ -1788,9 +1811,15 @@ async def generate_next_mission(mid: str, request: Request):
 # ──────────────────────────────────────────────
 
 @app.get("/api/lanes")
-async def get_lanes():
-    """Return live lane topology — all lanes with running/free slot counts."""
-    from lanes import snapshot as lane_snapshot
+async def get_lanes(project_id: str | None = None):
+    """Return live lane topology with running/free slot counts.
+
+    With ?project_id=, returns globals + that project's own lanes (the mission
+    picker uses this). Without it, returns ALL lanes (Fleet Config global view).
+    """
+    from lanes import snapshot as lane_snapshot, list_lanes_for_project
+    if project_id:
+        return await list_lanes_for_project(project_id)
     return await lane_snapshot()
 
 
@@ -1851,6 +1880,7 @@ async def create_lane_endpoint(body: LaneCreate, request: Request):
             default_model=body.default_model,
             tool_preset=body.tool_preset,
             color=body.color,
+            project_id=body.project_id,
         )
     except LaneValidationError as exc:
         raise HTTPException(400, str(exc))
@@ -2008,6 +2038,14 @@ async def dispatch(request: Request, mid: str, body: DispatchOptions | None = No
         if mission["status"] == "running":
             raise HTTPException(400, "Mission already running")
 
+        # Scope gate: a DispatchOptions.lane override can't pull another project's lane.
+        if body and body.lane:
+            from lanes import assert_lane_in_scope, LaneValidationError as _LaneScopeErr
+            try:
+                await assert_lane_in_scope(body.lane, mission["project_id"])
+            except _LaneScopeErr as _exc:
+                raise HTTPException(400, str(_exc))
+
         # Per-lane capacity check
         from lanes import check_slot
         ok, reason = await check_slot(mission)
@@ -2081,6 +2119,14 @@ async def resume(mid: str, body: DispatchOptions | None = None):
         mission = dict(rows[0])
         if mission["status"] == "running":
             raise HTTPException(400, "Mission already running")
+
+        # Scope gate: a DispatchOptions.lane override can't pull another project's lane.
+        if body and body.lane:
+            from lanes import assert_lane_in_scope, LaneValidationError as _LaneScopeErr
+            try:
+                await assert_lane_in_scope(body.lane, mission["project_id"])
+            except _LaneScopeErr as _exc:
+                raise HTTPException(400, str(_exc))
 
         # Find the last session with a Claude session ID
         sessions = await conn.execute_fetchall(

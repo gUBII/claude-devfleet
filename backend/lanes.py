@@ -129,9 +129,44 @@ async def snapshot() -> list[dict]:
             "tool_preset": policy.get("tool_preset", "implement"),
             "enabled": bool(policy.get("enabled", 1)),
             "user_created": bool(policy.get("user_created", 0)),
+            "project_id": policy.get("project_id"),
         })
     return sorted(result, key=lambda x: list(LANE_DEFAULTS.keys()).index(x["name"])
                   if x["name"] in LANE_DEFAULTS else 99)
+
+
+async def list_lanes_for_project(project_id: str | None) -> list[dict]:
+    """Lanes visible to a project: globals (project_id NULL) + that project's own.
+
+    Built on snapshot() so callers get live running/free counts. When project_id
+    is falsy, only global lanes are returned.
+    """
+    all_lanes = await snapshot()
+    return [
+        l for l in all_lanes
+        if l.get("project_id") is None or l.get("project_id") == project_id
+    ]
+
+
+async def assert_lane_in_scope(lane_name: str, project_id: str) -> None:
+    """Raise LaneValidationError if `lane_name` is owned by a DIFFERENT project.
+
+    Global lanes (project_id NULL) and unknown names — which derive_lane resolves
+    to the global 'coder' fallback — are always allowed. Mirrors the
+    user_project_access scope-gate posture one level down: a project-scoped
+    Worker must not be invoked from another project's mission.
+    """
+    name = (lane_name or "").strip()
+    if not name:
+        return
+    lane = await get_one_lane(name)
+    if not lane:
+        return  # unknown name → coder fallback (global); nothing to gate
+    owner = lane.get("project_id")
+    if owner and owner != project_id:
+        raise LaneValidationError(
+            f"Lane '{name}' belongs to another project and can't be used here."
+        )
 
 
 async def get_all_lanes() -> list[dict]:
@@ -289,6 +324,7 @@ async def create_lane(
     default_model: str = "claude-sonnet-4-6",
     tool_preset: str = "implement",
     color: str = "#888888",
+    project_id: str | None = None,
 ) -> dict:
     """Insert a user-created lane and warm cache. Raises LaneValidationError
     on bad input or duplicate name (built-in or already-created)."""
@@ -308,9 +344,9 @@ async def create_lane(
         await conn.execute(
             """INSERT INTO lanes
                (name, max_agents, default_model, tool_preset, append_prompt,
-                color, icon, enabled, user_created)
-               VALUES (?, ?, ?, ?, '', ?, ?, 1, 1)""",
-            (name, max_agents, default_model, tool_preset, color, icon),
+                color, icon, enabled, user_created, project_id)
+               VALUES (?, ?, ?, ?, '', ?, ?, 1, 1, ?)""",
+            (name, max_agents, default_model, tool_preset, color, icon, project_id),
         )
         await conn.commit()
         rows = await conn.execute_fetchall(

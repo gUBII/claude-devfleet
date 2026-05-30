@@ -393,6 +393,7 @@ class LaneCreate(BaseModel):
     append_prompt: str = ""
     color: str = "#888888"
     icon: str = ""
+    project_id: Optional[str] = None   # None = global lane; else owned by this project
 
 
 class LaneUpdate(BaseModel):

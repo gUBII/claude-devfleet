@@ -159,6 +159,7 @@ CREATE TABLE IF NOT EXISTS lanes (
     color TEXT DEFAULT '#888888',
     icon TEXT DEFAULT '',
     enabled INTEGER DEFAULT 1,
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -394,6 +395,13 @@ async def init_db():
             "ALTER TABLE agent_sessions ADD COLUMN idempotency_key TEXT",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_idempotency_key "
             "ON agent_sessions(idempotency_key) WHERE idempotency_key IS NOT NULL",
+            # v19: project-scoped lanes — nullable owner project (NULL = global).
+            # Built-in + global lanes stay NULL; user-created project lanes set it.
+            # Plain column on existing DBs (no enforced FK via ALTER); fresh DBs get
+            # the FK via SCHEMA. Orphan cleanup on project-delete is explicit in
+            # app.py (defence-in-depth, version-independent).
+            "ALTER TABLE lanes ADD COLUMN project_id TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_lanes_project ON lanes(project_id)",
         ]
         for migration in migrations:
             try:

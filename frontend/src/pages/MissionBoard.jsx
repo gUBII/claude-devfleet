@@ -275,9 +275,20 @@ export default function MissionBoard({ navigate }) {
                     aria-label="Lane"
                   >
                     <option value="">Auto (from mission type)</option>
-                    {lanes.map(l => (
-                      <option key={l.name} value={l.name}>{laneLabel(l)}</option>
-                    ))}
+                    {lanes.some(l => l.project_id && l.project_id === form.project_id) && (
+                      <optgroup label="This project">
+                        {lanes
+                          .filter(l => l.project_id && l.project_id === form.project_id)
+                          .map(l => (
+                            <option key={l.name} value={l.name}>{laneLabel(l)}</option>
+                          ))}
+                      </optgroup>
+                    )}
+                    <optgroup label="Global">
+                      {lanes.filter(l => !l.project_id).map(l => (
+                        <option key={l.name} value={l.name}>{laneLabel(l)}</option>
+                      ))}
+                    </optgroup>
                   </select>
                 </div>
               </div>

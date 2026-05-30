@@ -605,6 +605,14 @@ async def _create_mission(args: dict, conn) -> dict:
         from models import MISSION_TYPE_TO_LANE
         lane = MISSION_TYPE_TO_LANE.get(mission_type, "coder")
 
+    # Scope gate: a project-owned lane can't be bound to another project's mission.
+    # (REST create_mission enforces the same; this is the direct-DB MCP path.)
+    from lanes import assert_lane_in_scope, LaneValidationError as _LaneScopeErr
+    try:
+        await assert_lane_in_scope(lane, args["project_id"])
+    except _LaneScopeErr as _exc:
+        return {"error": str(_exc)}
+
     await conn.execute(
         """INSERT INTO missions
            (id, project_id, title, detailed_prompt, acceptance_criteria,

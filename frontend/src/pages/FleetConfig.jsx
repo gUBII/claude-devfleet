@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   getSystemStatus, setGlobalCeiling, listLanes, updateLane,
-  createLane, deleteLane,
+  createLane, deleteLane, listProjects,
 } from '../api/client';
 import { Knob, Switch, Meter, LED } from '../components/hw';
 import { modelBrand } from '../lib/modelBrand';
@@ -159,12 +159,13 @@ function LaneEditor({ lane, onSave, onClose, onDeleted, navigate }) {
   );
 }
 
-function NewLaneModal({ onCreated, onClose, navigate }) {
+function NewLaneModal({ onCreated, onClose, navigate, projects = [] }) {
   const [form, setForm] = useState({
     name: '',
     icon: '🧩',
     max_agents: 1,
     default_model: 'claude-sonnet-4-6',
+    project_id: '',
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -176,7 +177,7 @@ function NewLaneModal({ onCreated, onClose, navigate }) {
     setSaving(true);
     setError(null);
     try {
-      const created = await createLane(form);
+      const created = await createLane({ ...form, project_id: form.project_id || null });
       try {
         sessionStorage.setItem('devfleet:prompt-studio:lane', created.name);
       } catch { /* sessionStorage may be unavailable */ }
@@ -251,6 +252,19 @@ function NewLaneModal({ onCreated, onClose, navigate }) {
             </select>
           </div>
 
+          <div className="field-row">
+            <label>Scope</label>
+            <select
+              value={form.project_id}
+              onChange={e => setForm(f => ({ ...f, project_id: e.target.value }))}
+            >
+              <option value="">Global — available to every project</option>
+              {projects.map(p => (
+                <option key={p.id} value={p.id}>This project: {p.name}</option>
+              ))}
+            </select>
+          </div>
+
           <div className="field-hint" style={{ marginTop: 12, opacity: 0.7 }}>
             System prompt starts blank — you'll be sent to Prompt Studio to author it after Save.
           </div>
@@ -315,6 +329,7 @@ function CeilingPicker({ ceiling, onChange }) {
 
 export default function FleetConfig({ navigate }) {
   const [lanes, setLanes] = useState([]);
+  const [projects, setProjects] = useState([]);
   const [ceiling, setCeiling] = useState(0);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null);
@@ -323,12 +338,14 @@ export default function FleetConfig({ navigate }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [lanesRes, statusRes] = await Promise.all([
+      const [lanesRes, statusRes, projectsRes] = await Promise.all([
         listLanes(),
         getSystemStatus(),
+        listProjects(),
       ]);
       setLanes(lanesRes);
       setCeiling(statusRes.max_agents ?? 0);
+      setProjects(projectsRes || []);
     } catch (e) {
       console.error('Failed to load fleet config', e);
     } finally {
@@ -344,6 +361,7 @@ export default function FleetConfig({ navigate }) {
   };
 
   const totalSlots = lanes.reduce((s, l) => s + (l.enabled ? (l.max_agents ?? 0) : 0), 0);
+  const projectName = (pid) => projects.find(p => p.id === pid)?.name;
 
   if (loading) return <div className="page-loading">Loading fleet config…</div>;
 
@@ -379,6 +397,9 @@ export default function FleetConfig({ navigate }) {
               <div className="lane-meta">
                 <div className="lane-name">{lane.name.replace('_', ' ')}</div>
                 <div className="lane-model">{modelBrand(lane.default_model)}</div>
+                <div className="lane-scope" style={{ fontSize: 11, opacity: 0.7 }}>
+                  {lane.project_id ? `▣ ${projectName(lane.project_id) || 'project'}` : '◇ Global'}
+                </div>
               </div>
               <div className="lane-slots">
                 <span className="slot-running">{lane.running ?? 0}</span>
@@ -425,6 +446,7 @@ export default function FleetConfig({ navigate }) {
           onCreated={() => { setCreating(false); load(); }}
           onClose={() => setCreating(false)}
           navigate={navigate}
+          projects={projects}
         />
       )}
     </div>
