@@ -92,7 +92,7 @@ const INTEGRATIONS = [
       },
     ],
     docsUrl: 'https://github.com/LEC-AI/claude-devfleet/tree/main/integrations/cursor',
-    features: ['Native MCP support', 'AI chat integration', 'Project & global config', 'All 11 tools available'],
+    features: ['Native MCP support', 'AI chat integration', 'Project & global config', 'All 13 tools available'],
   },
   {
     id: 'windsurf',
@@ -122,7 +122,7 @@ const INTEGRATIONS = [
   {
     id: 'custom-mcp',
     name: 'Any MCP Client',
-    description: 'DevFleet exposes a standard MCP server via Streamable HTTP. Any MCP-compatible client can connect and use all 11 orchestration tools.',
+    description: 'DevFleet exposes a standard MCP server via Streamable HTTP. Any MCP-compatible client can connect and use all 13 orchestration tools.',
     icon: (
       <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
         <path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" />
@@ -143,22 +143,26 @@ POST messages: http://localhost:18801/mcp/messages/`,
       },
     ],
     docsUrl: 'https://github.com/LEC-AI/claude-devfleet',
-    features: ['11 orchestration tools', 'Streamable HTTP transport', 'SSE backward compat', 'JSON-RPC 2.0'],
+    features: ['13 orchestration tools', 'Streamable HTTP transport', 'SSE backward compat', 'JSON-RPC 2.0'],
   },
 ];
 
+// Mirrors backend/mcp_external.py TOOLS (13). Args marked ? are optional.
+// acting_user_email / idempotency_key are the revamped scope + retry controls.
 const MCP_TOOLS = [
-  { name: 'plan_project', args: 'prompt', desc: 'AI breaks description into chained missions with dependency DAG' },
+  { name: 'plan_project', args: 'prompt, project_path?', desc: 'AI breaks a description into a project + chained missions with a dependency DAG' },
   { name: 'create_project', args: 'name, path?, description?', desc: 'Create a project manually' },
-  { name: 'create_mission', args: 'project_id, title, prompt, depends_on?, auto_dispatch?', desc: 'Add a mission with dependencies' },
-  { name: 'dispatch_mission', args: 'mission_id, model?, max_turns?', desc: 'Start an agent on a mission' },
-  { name: 'cancel_mission', args: 'mission_id', desc: 'Stop a running agent' },
-  { name: 'wait_for_mission', args: 'mission_id, timeout_seconds?', desc: 'Block until mission completes (max 1800s)' },
+  { name: 'list_projects', args: '—', desc: 'Browse all projects' },
+  { name: 'create_mission', args: 'project_id, title, prompt, lane?, depends_on?, auto_dispatch?, created_by_email?, idempotency_key?', desc: 'Add a mission. Scope-checked by project; idempotency_key makes retries safe' },
+  { name: 'update_mission', args: 'mission_id, title?, prompt?, lane?, depends_on?, acting_user_email?', desc: 'Edit an un-started mission (refuses running ones)' },
+  { name: 'delete_mission', args: 'mission_id, acting_user_email?', desc: 'Delete a draft mission (refuses running or depended-on)' },
+  { name: 'list_missions', args: 'project_id, status?', desc: 'List missions in a project' },
+  { name: 'dispatch_mission', args: 'mission_id, model?, max_turns?, acting_user_email?, idempotency_key?', desc: 'Start an agent on a mission. Scope-checked against the project' },
+  { name: 'cancel_mission', args: 'mission_id, acting_user_email?', desc: 'Stop a running agent' },
+  { name: 'wait_for_mission', args: 'mission_id, timeout_seconds?', desc: 'Block until a mission completes (max 1800s)' },
   { name: 'get_mission_status', args: 'mission_id', desc: 'Check mission progress without blocking' },
   { name: 'get_report', args: 'mission_id', desc: 'Structured report: files_changed, what_done, errors, next_steps' },
-  { name: 'get_dashboard', args: '', desc: 'System overview: running agents, slots, recent activity' },
-  { name: 'list_projects', args: '', desc: 'Browse all projects' },
-  { name: 'list_missions', args: 'project_id, status?', desc: 'List missions in a project' },
+  { name: 'get_dashboard', args: '—', desc: 'System overview: running agents, slots, recent activity' },
 ];
 
 export default function Integrations({ navigate }) {
@@ -478,6 +482,67 @@ export default function Integrations({ navigate }) {
             </tbody>
           </table>
         </div>
+      </div>
+
+      {/* Security & Reliability — the revamped MCP surface */}
+      <div style={{
+        padding: '20px 24px',
+        background: 'var(--bg-surface)',
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius-lg, 12px)',
+        marginBottom: 24,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+          </svg>
+          <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>
+            Security &amp; Reliability
+          </span>
+        </div>
+        <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '6px 0 16px', lineHeight: 1.5 }}>
+          The MCP surface is hardened — per-user project scoping, idempotent retries, and structured errors.
+        </p>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12 }}>
+          {[
+            {
+              title: 'Authentication',
+              body: 'Loopback callers (local Claude CLI) are trusted automatically. External / tunnelled callers send a token header — enforced when a key is set.',
+              code: 'X-DevFleet-Token: $DEVFLEET_MCP_KEY',
+            },
+            {
+              title: 'Project scope gating',
+              body: 'create / dispatch / cancel / update / delete are scope-checked via acting_user_email (create_mission uses created_by_email) — you must be bound to the project, else SCOPE_DENIED.',
+              code: 'acting_user_email: "you@devfleet.local"',
+            },
+            {
+              title: 'Idempotent retries',
+              body: 'create_mission and dispatch_mission take an idempotency_key. A retry with the same key replays the original result — never a duplicate mission or a second agent.',
+              code: 'idempotency_key: "<uuid>"',
+            },
+            {
+              title: 'Typed errors',
+              body: 'Failures return a structured envelope (INVALID_PARAMS · SCOPE_DENIED · INTERNAL), not an opaque -32602. Give every JSON-RPC call a unique id.',
+              code: '{ error: { code: "SCOPE_DENIED" } }',
+            },
+          ].map(item => (
+            <div key={item.title} style={{
+              padding: '12px 14px', background: 'var(--bg-base)',
+              borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-primary)', marginBottom: 6 }}>{item.title}</div>
+              <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '0 0 8px', lineHeight: 1.5 }}>{item.body}</p>
+              <code style={{
+                display: 'block', fontFamily: 'var(--font-mono)', fontSize: 10,
+                color: 'var(--accent-text)', background: 'var(--bg-surface)',
+                padding: '5px 8px', borderRadius: 'var(--radius-sm)', overflow: 'auto', whiteSpace: 'nowrap',
+              }}>{item.code}</code>
+            </div>
+          ))}
+        </div>
+        <p style={{ fontSize: 10.5, color: 'var(--text-dim)', margin: '14px 0 0', lineHeight: 1.5 }}>
+          SSE transport is deprecated (removal 2026-07-01). Prefer Streamable HTTP at <code style={{ fontFamily: 'var(--font-mono)', fontSize: 10 }}>/mcp</code>.
+        </p>
       </div>
 
       {/* Connection Info */}
