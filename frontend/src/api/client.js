@@ -278,8 +278,24 @@ export const getLanesStudioSummary = () => request('/lanes/studio-summary');
 export const login = (data) => request('/auth/login', { method: 'POST', body: JSON.stringify(data) });
 export const register = (data) => request('/auth/register', { method: 'POST', body: JSON.stringify(data) });
 export const getMe = () => request('/auth/me');
-export const createInvite = () => request('/auth/invite', { method: 'POST' });
+export const createInvite = (displayName, folderName = '') =>
+  request('/auth/invite', {
+    method: 'POST',
+    body: JSON.stringify({ display_name: displayName, folder_name: folderName || null }),
+  });
 export const listUsers = () => request('/auth/users');
+
+// ── Peer sharing — projects + workers (owner-or-admin authority) ──────────────
+export const listProjectShares = (pid) => request(`/projects/${pid}/share`);
+export const shareProject = (pid, userId) =>
+  request(`/projects/${pid}/share`, { method: 'POST', body: JSON.stringify({ user_id: userId }) });
+export const unshareProject = (pid, userId) =>
+  request(`/projects/${pid}/share`, { method: 'DELETE', body: JSON.stringify({ user_id: userId }) });
+export const shareWorker = (pid, laneName, targetProjectId) =>
+  request(`/projects/${pid}/share-worker`, {
+    method: 'POST',
+    body: JSON.stringify({ lane_name: laneName, target_project_id: targetProjectId }),
+  });
 
 // ── Admin — per-user project-scope bindings + activity ────────────────────────
 export const adminListUsers = () => request('/admin/users');

@@ -21,7 +21,7 @@ from models import (ProjectCreate, ProjectUpdate, MissionCreate, MissionUpdate,
                     HitlAskRequest, HitlReply, ProjectChatRequest,
                     GitHubTokenSet, UserPermissionGrant, CHAT_PERMISSIONS,
                     ChangePasswordRequest, LaneCreate, LaneUpdate,
-                    ProjectAccessGrant)
+                    ProjectAccessGrant, InviteCreate, ProjectShare, WorkerShare)
 import health_checker
 import mission_watcher
 import scheduler
@@ -481,13 +481,30 @@ async def auth_login(request: Request, body: UserLogin):
             "user": {"id": user["id"], "email": user["email"], "role": user["role"]}}
 
 
+async def _delete_user(user_id: str) -> None:
+    conn = await db.get_db()
+    try:
+        await conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
 @app.post("/api/auth/register")
 @_limiter.limit("5/minute")
 async def auth_register(request: Request, body: UserCreate):
-    from auth import get_user_by_email, create_user, consume_invite_token, create_access_token
+    from auth import (
+        get_user_by_email, create_user, consume_invite_token,
+        set_user_display_name, release_invite_token, create_access_token,
+        verify_password,
+    )
+    from provisioning import provision_personal_project
     # Generic 400 for any registration failure (existing email, invalid token,
     # bad password) so we don't leak which inputs are valid.
     if await get_user_by_email(body.email):
+        # Burn a bcrypt verify on the taken-email path so registration timing does
+        # not leak whether an email is already registered (mirrors login).
+        verify_password(body.password, None)
         log.info("Registration rejected: email already in use (%s)", body.email)
         raise HTTPException(400, "Registration failed — check your invite token and try again")
     try:
@@ -495,18 +512,43 @@ async def auth_register(request: Request, body: UserCreate):
     except ValueError:
         log.exception("Registration rejected: invalid password")
         raise HTTPException(400, "Registration failed — check your invite token and try again")
-    valid = await consume_invite_token(body.invite_token, user["id"])
-    if not valid:
-        conn = await db.get_db()
-        try:
-            await conn.execute("DELETE FROM users WHERE id=?", (user["id"],))
-            await conn.commit()
-        finally:
-            await conn.close()
+
+    invite = await consume_invite_token(body.invite_token, user["id"])
+    if not invite:
+        await _delete_user(user["id"])
         raise HTTPException(400, "Registration failed — check your invite token and try again")
+
+    # The invite carries the admin-entered name (+ optional folder slug). Stamp
+    # the name on the user, then auto-provision their personal project folder.
+    display_name = (invite.get("display_name") or "").strip()
+    folder_name = (invite.get("folder_name") or "").strip()
+
+    # Saga: both the name stamp and provisioning are inside the try so EITHER
+    # failing rolls back the same way. provision_personal_project rolls back its
+    # OWN folder + projects row; we roll back the user + release the invite token
+    # so the admin's link works for a retry. The account is useless without its
+    # name + workspace, so any failure here is fatal.
+    try:
+        if display_name:
+            await set_user_display_name(user["id"], display_name)
+        await provision_personal_project(
+            user["id"], display_name, folder_seed=folder_name
+        )
+    except Exception:
+        log.exception("Provisioning failed for %s — rolling back registration", body.email)
+        # Order matters: consume_invite_token stamped used_by=<user_id>, and
+        # invite_tokens.used_by → users(id) has no ON DELETE action (FKs are ON),
+        # so deleting the user while the token still references them violates the
+        # constraint and aborts the whole rollback. Release the token FIRST to drop
+        # that reference, then the user delete succeeds.
+        await release_invite_token(body.invite_token)
+        await _delete_user(user["id"])
+        raise HTTPException(500, "Registration failed — please try again")
+
     token = create_access_token(user["id"], user["email"], user["role"])
     return {"access_token": token, "token_type": "bearer",
-            "user": {"id": user["id"], "email": user["email"], "role": user["role"]}}
+            "user": {"id": user["id"], "email": user["email"], "role": user["role"],
+                     "display_name": display_name}}
 
 
 @app.get("/api/auth/me")
@@ -518,13 +560,26 @@ async def auth_me(request: Request):
 
 
 @app.post("/api/auth/invite")
-async def auth_invite(request: Request):
+async def auth_invite(request: Request, body: InviteCreate):
     user = getattr(request.state, "user", None)
     if not user or user.get("role") != "admin":
         raise HTTPException(403, "Admin access required")
     from auth import create_invite_token
-    token = await create_invite_token(user["sub"])
-    return {"invite_token": token, "expires_in": "7 days"}
+    display_name = body.display_name.strip()
+    folder_name = (body.folder_name or "").strip()
+    token = await create_invite_token(
+        user["sub"], display_name=display_name, folder_name=folder_name
+    )
+    # Relative path only — the admin's browser composes the absolute URL from its
+    # own origin (window.location.origin). The SPA and API can live on different
+    # origins (local dev: 3100 vs 18801), so request.base_url would be wrong.
+    # App.jsx auto-routes `?invite=<token>` straight to the Register page.
+    return {
+        "invite_token": token,
+        "invite_path": f"/?invite={token}",
+        "display_name": display_name,
+        "expires_in": "7 days",
+    }
 
 
 @app.get("/api/auth/users")
@@ -596,6 +651,7 @@ async def list_dev_profiles(request: Request):
         out.append({
             "user_id": r["id"],
             "email": r["email"],
+            "display_name": r["display_name"],
             "github_login": r["github_login"],
             "github_name": r["github_name"],
             "avatar_url": _derive_avatar_url(r["github_noreply_email"]),
@@ -1359,17 +1415,20 @@ async def list_projects(request: Request):
 
 
 @app.post("/api/projects", status_code=201)
-async def create_project(body: ProjectCreate):
+async def create_project(body: ProjectCreate, request: Request):
     # Store the original host path, but validate the resolved (container) path
     resolved = resolve_path(body.path)
     if not os.path.isdir(resolved):
         raise HTTPException(400, f"Path does not exist: {body.path}")
+    # Stamp the creator as owner so they (not just admins) can peer-share it.
+    user = getattr(request.state, "user", None)
+    created_by = user["sub"] if user else ""
     pid = str(uuid.uuid4())
     conn = await db.get_db()
     try:
         await conn.execute(
-            "INSERT INTO projects (id, name, path, description) VALUES (?, ?, ?, ?)",
-            (pid, body.name, body.path, body.description),
+            "INSERT INTO projects (id, name, path, description, created_by) VALUES (?, ?, ?, ?, ?)",
+            (pid, body.name, body.path, body.description, created_by),
         )
         await conn.commit()
         row = await conn.execute_fetchall("SELECT * FROM projects WHERE id=?", (pid,))
@@ -1446,6 +1505,101 @@ async def delete_project(pid: str, request: Request):
     # Drop the removed project's lanes out of the in-memory cache immediately.
     from lanes import reload_cache as _reload_lanes
     await _reload_lanes()
+
+
+# ──────────────────────────────────────────────
+# Peer project sharing — owner-or-admin grants/revokes another user's access to
+# a project. A shared-in collaborator can USE the project but cannot re-share it
+# (authority is gated on `is_project_owner_or_admin`, not plain access).
+# ──────────────────────────────────────────────
+
+
+async def _project_or_404(pid: str) -> dict:
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall("SELECT * FROM projects WHERE id=?", (pid,))
+        if not rows:
+            raise HTTPException(404, "Project not found")
+        return dict(rows[0])
+    finally:
+        await conn.close()
+
+
+@app.get("/api/projects/{pid}/share")
+async def list_project_share(pid: str, request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    from auth import is_project_owner_or_admin, list_project_shares
+    await _project_or_404(pid)
+    if not await is_project_owner_or_admin(user["sub"], pid):
+        raise HTTPException(403, "Only the project owner or an admin can manage sharing")
+    return await list_project_shares(pid)
+
+
+@app.post("/api/projects/{pid}/share", status_code=201)
+async def share_project(pid: str, body: ProjectShare, request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    from auth import is_project_owner_or_admin, get_user_by_id, grant_project_access
+    await _project_or_404(pid)
+    if not await is_project_owner_or_admin(user["sub"], pid):
+        raise HTTPException(403, "Only the project owner or an admin can share this project")
+    if not await get_user_by_id(body.user_id):
+        raise HTTPException(404, "User not found")
+    await grant_project_access(body.user_id, pid, granted_by=user["sub"])
+    return {"shared": True, "project_id": pid, "user_id": body.user_id}
+
+
+@app.delete("/api/projects/{pid}/share", status_code=204)
+async def unshare_project(pid: str, body: ProjectShare, request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    from auth import is_project_owner_or_admin, revoke_project_access
+    project = await _project_or_404(pid)
+    if not await is_project_owner_or_admin(user["sub"], pid):
+        raise HTTPException(403, "Only the project owner or an admin can unshare this project")
+    # Never strip the owner's own binding — it would hide their own project from
+    # their Projects list while they still own it. (created_by='' never matches.)
+    if body.user_id == project.get("created_by"):
+        raise HTTPException(400, "Cannot remove the project owner's access")
+    await revoke_project_access(body.user_id, pid)
+
+
+@app.post("/api/projects/{pid}/share-worker", status_code=201)
+async def share_worker(pid: str, body: WorkerShare, request: Request):
+    """Clone a Worker (lane) from this project (`pid`) into another project.
+
+    Authority: caller must have access to the SOURCE project (where the worker
+    lives) AND own-or-admin the TARGET project (where it's being added)."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    from auth import user_has_project_access, is_project_owner_or_admin
+    import lanes as _lanes
+
+    await _project_or_404(pid)
+    if not await user_has_project_access(user["sub"], pid):
+        raise HTTPException(403, "You don't have access to the source project")
+    target = await _project_or_404(body.target_project_id)
+    if not await is_project_owner_or_admin(user["sub"], body.target_project_id):
+        raise HTTPException(
+            403, "Only the target project's owner or an admin can add a worker to it"
+        )
+    target_slug = target.get("name") or body.target_project_id
+    try:
+        cloned = await _lanes.clone_lane_to_project(
+            body.lane_name, pid, body.target_project_id, target_slug
+        )
+    except _lanes.LaneValidationError as e:
+        raise HTTPException(400, str(e))
+    return {
+        "cloned_lane": cloned["name"],
+        "source_lane": body.lane_name,
+        "target_project_id": body.target_project_id,
+    }
 
 
 # ──────────────────────────────────────────────

@@ -220,6 +220,7 @@ async def list_public_profiles() -> list[dict]:
     try:
         async with db.execute(
             "SELECT u.id, u.email, "
+            "COALESCE(u.display_name, '') AS display_name, "
             "COALESCE(u.github_login, '') AS github_login, "
             "COALESCE(u.github_name, '') AS github_name, "
             "COALESCE(u.github_noreply_email, '') AS github_noreply_email, "

@@ -121,7 +121,7 @@ async def test_dev_profiles_payload_shape(app_client):
     assert len(body) == 1
     row = body[0]
     expected_keys = {
-        "user_id", "email", "github_login", "github_name", "avatar_url",
+        "user_id", "email", "display_name", "github_login", "github_name", "avatar_url",
         "likeness_points", "pr_merges_clean", "pr_merges_total",
         "dollars_saved_routing", "current_clean_streak", "longest_clean_streak",
     }
@@ -129,3 +129,5 @@ async def test_dev_profiles_payload_shape(app_client):
     # New user with no events → all zeroed
     assert row["likeness_points"] == 0
     assert row["dollars_saved_routing"] == 0
+    # No invite display name set → empty string, not null
+    assert row["display_name"] == ""

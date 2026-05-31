@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS projects (
     name TEXT NOT NULL,
     path TEXT NOT NULL,
     description TEXT DEFAULT '',
+    created_by TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -192,6 +193,7 @@ CREATE TABLE IF NOT EXISTS users (
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     role TEXT DEFAULT 'user',
+    display_name TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     last_login_at TEXT
 );
@@ -202,6 +204,8 @@ CREATE TABLE IF NOT EXISTS invite_tokens (
     used_by TEXT REFERENCES users(id),
     used_at TEXT,
     expires_at TEXT NOT NULL,
+    display_name TEXT DEFAULT '',
+    folder_name TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -402,6 +406,16 @@ async def init_db():
             # app.py (defence-in-depth, version-independent).
             "ALTER TABLE lanes ADD COLUMN project_id TEXT",
             "CREATE INDEX IF NOT EXISTS idx_lanes_project ON lanes(project_id)",
+            # v20: named invites → personal folders → leaderboard identity → ownership.
+            # display_name shows on the leaderboard instead of email. The invite
+            # carries the admin-entered name (display_name) + an optional folder
+            # override (folder_name), travelling admin→signup on the token row.
+            # projects.created_by marks the owner for peer-share authority. All
+            # nullable/defaulted — legacy rows read as '' (anonymous / unowned).
+            "ALTER TABLE users ADD COLUMN display_name TEXT DEFAULT ''",
+            "ALTER TABLE invite_tokens ADD COLUMN display_name TEXT DEFAULT ''",
+            "ALTER TABLE invite_tokens ADD COLUMN folder_name TEXT DEFAULT ''",
+            "ALTER TABLE projects ADD COLUMN created_by TEXT DEFAULT ''",
         ]
         for migration in migrations:
             try:

@@ -6,6 +6,7 @@ import {
   adminRevokeProjectAccess,
   adminGetUserActivity,
   listProjects,
+  createInvite,
 } from '../api/client';
 import { useFleetEvents } from '../hooks/useFleetEvents';
 import { useAuth } from '../auth';
@@ -176,6 +177,86 @@ function UserCard({ user, allProjects, onChanged }) {
   );
 }
 
+const inputStyle = {
+  padding: '6px 10px', background: 'var(--surface-2, #141414)',
+  border: '1px solid var(--border, #222)', borderRadius: 6, color: 'var(--text)',
+};
+
+function InviteGenerator() {
+  const [name, setName] = useState('');
+  const [folder, setFolder] = useState('');
+  const [link, setLink] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [copied, setCopied] = useState(false);
+
+  const generate = async () => {
+    if (!name.trim()) return;
+    setBusy(true);
+    setError(null);
+    setCopied(false);
+    setLink('');
+    try {
+      const res = await createInvite(name.trim(), folder.trim());
+      // The API returns a relative path; the absolute URL is composed here from
+      // the admin's own origin (SPA + API may live on different origins).
+      setLink(window.location.origin + res.invite_path);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard blocked — the field is selectable for manual copy */
+    }
+  };
+
+  return (
+    <div className="card" style={{ marginBottom: 20 }}>
+      <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>Invite a teammate</div>
+      <p className="text-sm text-muted" style={{ marginBottom: 12 }}>
+        Their name seeds a personal project folder and their leaderboard identity on signup. The folder slug is optional.
+      </p>
+      {error && <div style={{ color: 'var(--danger)', marginBottom: 10 }}>{error}</div>}
+      <div className="flex items-center" style={{ gap: 8, flexWrap: 'wrap' }}>
+        <input
+          value={name}
+          onChange={e => setName(e.target.value)}
+          placeholder="Full name (e.g. Alice Wong)"
+          style={{ ...inputStyle, flex: '2 1 220px' }}
+        />
+        <input
+          value={folder}
+          onChange={e => setFolder(e.target.value)}
+          placeholder="Folder slug (optional)"
+          style={{ ...inputStyle, flex: '1 1 160px' }}
+        />
+        <button className="btn btn-primary btn-sm" disabled={!name.trim() || busy} onClick={generate}>
+          {busy ? 'Generating…' : 'Generate link'}
+        </button>
+      </div>
+      {link && (
+        <div className="flex items-center" style={{ gap: 8, marginTop: 12 }}>
+          <input
+            readOnly
+            value={link}
+            onFocus={e => e.target.select()}
+            style={{ ...inputStyle, flex: 1, fontFamily: 'monospace', fontSize: 12 }}
+          />
+          <button className="btn btn-ghost btn-sm" onClick={copy}>{copied ? 'Copied!' : 'Copy'}</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function AdminUsers({ navigate }) {
   const { isAdmin } = useAuth();
   const [users, setUsers] = useState([]);
@@ -225,6 +306,8 @@ export default function AdminUsers({ navigate }) {
           <p>Bind each developer to the project folders they may see and dispatch agents into.</p>
         </div>
       </div>
+
+      <InviteGenerator />
 
       {error && <div style={{ color: 'var(--danger)', marginBottom: 16 }}>{error}</div>}
 

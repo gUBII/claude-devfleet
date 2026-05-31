@@ -4,6 +4,7 @@ import MissionCard from '../components/MissionCard';
 import StatusBadge from '../components/StatusBadge';
 import ProjectBot from '../components/ProjectBot';
 import MoofasaFloater from '../components/MoofasaFloater';
+import ProjectSharePanel from '../components/ProjectSharePanel';
 
 function timeAgo(dateStr) {
   if (!dateStr) return '';
@@ -99,6 +100,9 @@ export default function ProjectDetail({ id, navigate }) {
           <div className="stats-value" style={{ color: counts.failed ? 'var(--danger)' : 'var(--text-dim)' }}>{counts.failed || 0}</div>
         </div>
       </div>
+
+      {/* Sharing (self-hides for non-owners) */}
+      <ProjectSharePanel projectId={id} project={project} />
 
       {/* Filter tabs */}
       <div className="filter-tabs">

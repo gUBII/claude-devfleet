@@ -1,5 +1,19 @@
-from pydantic import BaseModel, Field
+import unicodedata
+
+from pydantic import BaseModel, Field, field_validator
 from typing import Literal, Optional, List
+
+
+def _strip_control_chars(value: Optional[str]) -> Optional[str]:
+    """Drop Unicode control (Cc) and format (Cf) characters, then trim. Closes
+    leaderboard/git-metadata spoofing via newlines, NULs, zero-width joiners, and
+    RTL/LTR overrides while leaving ordinary names (incl. non-ASCII) intact."""
+    if value is None:
+        return None
+    cleaned = "".join(
+        ch for ch in value if unicodedata.category(ch) not in ("Cc", "Cf")
+    )
+    return cleaned.strip()
 
 
 class ProjectCreate(BaseModel):
@@ -459,6 +473,34 @@ class UserCreate(BaseModel):
     email: str
     password: str
     invite_token: str
+
+
+class InviteCreate(BaseModel):
+    """Admin mints an invite tagged with the teammate's name. `display_name`
+    shows on the leaderboard + seeds their auto-created personal folder;
+    `folder_name` optionally overrides the folder slug."""
+    display_name: str = Field(..., min_length=1, max_length=80)
+    folder_name: Optional[str] = Field(default=None, max_length=80)
+
+    @field_validator("display_name", "folder_name", mode="after")
+    @classmethod
+    def _clean(cls, v: Optional[str], info) -> Optional[str]:
+        cleaned = _strip_control_chars(v)
+        if info.field_name == "display_name" and not cleaned:
+            raise ValueError("display_name must contain visible characters")
+        return cleaned
+
+
+class ProjectShare(BaseModel):
+    """Peer share: grant another user access to a project. Authority enforced
+    server-side (owner-or-admin)."""
+    user_id: str
+
+
+class WorkerShare(BaseModel):
+    """Clone a project's user-created Worker (lane) into another project."""
+    lane_name: str
+    target_project_id: str
 
 class UserLogin(BaseModel):
     email: str

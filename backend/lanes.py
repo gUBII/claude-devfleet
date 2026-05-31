@@ -359,6 +359,106 @@ async def create_lane(
     return result
 
 
+def _underscore_slug(text: str, max_len: int) -> str:
+    """Lane-name-safe slug: lowercase, every non-[a-z0-9] run → '_', trimmed.
+    Lane names forbid dashes (see _LANE_NAME_RE), so _slugify's dashes are wrong
+    here — underscores are the only legal separator."""
+    s = _re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")
+    return s[:max_len].strip("_")
+
+
+async def clone_lane_to_project(
+    source_lane: str, source_project_id: str, target_project_id: str, target_slug: str
+) -> dict:
+    """Clone a project's Worker (lane) into another project under a unique, valid
+    lane name `<source>__<target_slug>` (≤31 chars, `_N` on collision). Copies
+    every lane field (incl. append_prompt, which create_lane drops) and all
+    lane_mcp_tools rows. Returns the new lane row. Raises LaneValidationError if
+    the source isn't a worker of the source project."""
+    src = await get_one_lane(source_lane)
+    if not src:
+        raise LaneValidationError(f"Worker '{source_lane}' not found.")
+    if src.get("project_id") != source_project_id:
+        raise LaneValidationError(
+            f"Worker '{source_lane}' is not a worker of the source project."
+        )
+
+    # Lane names: ^[a-z][a-z0-9_]{1,30}$ → ≤31 chars, start with a letter (the
+    # source name already does), underscores only.
+    sep = "__"
+    budget = max(31 - len(source_lane) - len(sep), 1)
+    tslug = _underscore_slug(target_slug, budget) or "proj"
+    base = f"{source_lane}{sep}{tslug}"[:31].rstrip("_")
+
+    conn = await db.get_db()
+    try:
+        candidate = base
+        n = 1
+        while True:
+            exists = await conn.execute_fetchall(
+                "SELECT 1 FROM lanes WHERE name=?", (candidate,)
+            )
+            if not exists and candidate not in LANE_DEFAULTS:
+                break
+            n += 1
+            suffix = f"_{n}"
+            candidate = (base[: 31 - len(suffix)].rstrip("_")) + suffix
+
+        # Defense in depth: the slug math above should always yield a legal name,
+        # but never feed an unvalidated lane name to INSERT — a future change to
+        # the slug logic must not be able to write a name the rest of the system
+        # (which trusts _LANE_NAME_RE) can't address.
+        if not _LANE_NAME_RE.match(candidate):
+            raise LaneValidationError(
+                f"Computed worker name '{candidate}' is not a valid lane name."
+            )
+
+        await conn.execute(
+            """INSERT INTO lanes
+               (name, max_agents, default_model, tool_preset, append_prompt,
+                color, icon, enabled, user_created, project_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+            (
+                candidate,
+                src.get("max_agents", 1),
+                src.get("default_model", "claude-sonnet-4-6"),
+                src.get("tool_preset", "implement"),
+                src.get("append_prompt", "") or "",
+                src.get("color", "#888888"),
+                src.get("icon", "") or "",
+                int(bool(src.get("enabled", 1))),
+                target_project_id,
+            ),
+        )
+        tool_rows = await conn.execute_fetchall(
+            "SELECT server_name, tool_name, enabled, trigger_hint "
+            "FROM lane_mcp_tools WHERE lane_name=?",
+            (source_lane,),
+        )
+        for tr in tool_rows:
+            t = dict(tr)
+            await conn.execute(
+                """INSERT OR IGNORE INTO lane_mcp_tools
+                   (id, lane_name, server_name, tool_name, enabled, trigger_hint)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    f"{candidate}__{t['server_name']}__{t['tool_name']}",
+                    candidate,
+                    t["server_name"],
+                    t["tool_name"],
+                    t["enabled"],
+                    t["trigger_hint"],
+                ),
+            )
+        await conn.commit()
+        rows = await conn.execute_fetchall("SELECT * FROM lanes WHERE name=?", (candidate,))
+        result = dict(rows[0])
+    finally:
+        await conn.close()
+    await reload_cache()
+    return result
+
+
 async def delete_lane(name: str) -> tuple[bool, str]:
     """Delete a user-created lane. Built-ins are protected.
 

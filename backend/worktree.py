@@ -68,17 +68,37 @@ async def create_worktree(
 
     os.makedirs(worktree_dir, exist_ok=True)
 
-    # Always fetch main before branching — main is the canonical baseline (pseudo-prod)
+    # Refresh origin/main when there's a remote — main is the canonical baseline
+    # (pseudo-prod). Best-effort: a local-only project (e.g. an auto-provisioned
+    # personal folder) has no `origin`, so this just fails quietly.
     await _run(["git", "fetch", "origin", "main"], project_path)
 
-    # Branch from origin/main so all agent work is grounded in the current pre-prod state
+    # Pick the base ref with graceful fallback: origin/main (synced remote) →
+    # local main → HEAD. A personal folder created by provisioning.py has only a
+    # local `main`, so hard-requiring origin/main would fail every dispatch.
+    base_ref = None
+    for candidate in ("origin/main", "main", "HEAD"):
+        code, _, _ = await _run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}"],
+            project_path,
+        )
+        if code == 0:
+            base_ref = candidate
+            break
+    if base_ref is None:
+        log.error("No usable base ref (origin/main|main|HEAD) in %s", project_path)
+        return None, None
+
+    # Branch from the resolved baseline so agent work is grounded in current state
     code, out, err = await _run(
-        ["git", "worktree", "add", "-b", branch_name, worktree_path, "origin/main"],
+        ["git", "worktree", "add", "-b", branch_name, worktree_path, base_ref],
         project_path,
     )
     if code != 0:
         log.error("Failed to create worktree: %s", err)
         return None, None
+    if base_ref != "origin/main":
+        log.info("Worktree based on %s (origin/main unavailable) in %s", base_ref, project_path)
 
     log.info("Created worktree at %s on branch %s", worktree_path, branch_name)
 

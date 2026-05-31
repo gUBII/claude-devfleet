@@ -64,28 +64,58 @@ async def get_user_by_email(email: str) -> dict | None:
         await conn.close()
 
 
-async def create_user(email: str, password: str, role: str = "user") -> dict:
-    user_id = str(uuid.uuid4())
+async def get_user_by_id(user_id: str) -> dict | None:
     conn = await db.get_db()
     try:
-        await conn.execute(
-            "INSERT INTO users (id, email, password_hash, role) VALUES (?,?,?,?)",
-            (user_id, email, hash_password(password), role),
-        )
-        await conn.commit()
-        return {"id": user_id, "email": email, "role": role}
+        rows = await conn.execute_fetchall("SELECT * FROM users WHERE id=?", (user_id,))
+        return dict(rows[0]) if rows else None
     finally:
         await conn.close()
 
 
-async def create_invite_token(created_by: str) -> str:
+async def create_user(
+    email: str, password: str, role: str = "user", display_name: str = ""
+) -> dict:
+    user_id = str(uuid.uuid4())
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            "INSERT INTO users (id, email, password_hash, role, display_name) VALUES (?,?,?,?,?)",
+            (user_id, email, hash_password(password), role, display_name),
+        )
+        await conn.commit()
+        return {"id": user_id, "email": email, "role": role, "display_name": display_name}
+    finally:
+        await conn.close()
+
+
+async def set_user_display_name(user_id: str, display_name: str) -> None:
+    """Patch a user's display name. Used by register after the invite token
+    (which carries the admin-entered name) is consumed."""
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            "UPDATE users SET display_name=? WHERE id=?", (display_name, user_id)
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def create_invite_token(
+    created_by: str, display_name: str = "", folder_name: str = ""
+) -> str:
+    """Mint an invite token. `display_name` is the teammate's name (shown on the
+    leaderboard + seeds their personal folder); `folder_name` optionally overrides
+    the folder slug. Both ride the token row admin→signup."""
     token = str(uuid.uuid4())
     expire = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
     conn = await db.get_db()
     try:
         await conn.execute(
-            "INSERT INTO invite_tokens (token, created_by, expires_at) VALUES (?,?,?)",
-            (token, created_by, expire),
+            "INSERT INTO invite_tokens (token, created_by, expires_at, display_name, folder_name) "
+            "VALUES (?,?,?,?,?)",
+            (token, created_by, expire, display_name, folder_name),
         )
         await conn.commit()
         return token
@@ -93,22 +123,51 @@ async def create_invite_token(created_by: str) -> str:
         await conn.close()
 
 
-async def consume_invite_token(token: str, used_by: str) -> bool:
-    """Mark token used. Returns False if invalid/expired/already-used."""
+async def consume_invite_token(token: str, used_by: str) -> dict | None:
+    """Atomically mark the token used and return its row (incl. display_name /
+    folder_name). Returns None if invalid/expired/already-used.
+
+    The UPDATE is guarded by `used_by IS NULL` and we check the affected
+    rowcount, so two concurrent registers racing on the same token can't both
+    win — the loser sees rowcount 0 and gets None.
+    """
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall(
-            "SELECT token FROM invite_tokens WHERE token=? AND used_by IS NULL AND expires_at > datetime('now')",
+            "SELECT token, created_by, display_name, folder_name, expires_at "
+            "FROM invite_tokens WHERE token=? AND used_by IS NULL "
+            "AND expires_at > datetime('now')",
             (token,),
         )
         if not rows:
-            return False
-        await conn.execute(
-            "UPDATE invite_tokens SET used_by=?, used_at=datetime('now') WHERE token=?",
+            return None
+        cur = await conn.execute(
+            "UPDATE invite_tokens SET used_by=?, used_at=datetime('now') "
+            "WHERE token=? AND used_by IS NULL AND expires_at > datetime('now')",
             (used_by, token),
         )
+        if cur.rowcount == 0:
+            # Lost the race — another register consumed it, or it expired between
+            # the SELECT and the UPDATE.
+            await conn.rollback()
+            return None
         await conn.commit()
-        return True
+        return dict(rows[0])
+    finally:
+        await conn.close()
+
+
+async def release_invite_token(token: str) -> None:
+    """Un-consume a token so its invite link works again. Called by register's
+    saga rollback when personal-project provisioning fails after the token was
+    already marked used — the admin's link stays valid for a retry."""
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            "UPDATE invite_tokens SET used_by=NULL, used_at=NULL WHERE token=?",
+            (token,),
+        )
+        await conn.commit()
     finally:
         await conn.close()
 
@@ -204,6 +263,46 @@ async def user_has_project_access(user_id: str, project_id: str) -> bool:
             (user_id, project_id),
         )
         return bool(rows)
+    finally:
+        await conn.close()
+
+
+async def is_project_owner_or_admin(user_id: str, project_id: str) -> bool:
+    """True if the user is an admin OR the project's creator (`projects.created_by`).
+
+    Authority gate for peer-sharing: only an owner (or admin) may grant/revoke
+    other users' access to a project, or clone its workers elsewhere. Plain
+    `user_has_project_access` is NOT enough — a shared-in collaborator can use the
+    project but must not be able to re-share it."""
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT role FROM users WHERE id=?", (user_id,)
+        )
+        if rows and dict(rows[0]).get("role") == "admin":
+            return True
+        rows = await conn.execute_fetchall(
+            "SELECT 1 FROM projects WHERE id=? AND created_by=?",
+            (project_id, user_id),
+        )
+        return bool(rows)
+    finally:
+        await conn.close()
+
+
+async def list_project_shares(project_id: str) -> list[dict]:
+    """Return [{user_id, email, display_name, granted_at, granted_by}] for every
+    user bound to the project, newest grant first."""
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT upa.user_id, u.email, COALESCE(u.display_name,'') AS display_name, "
+            "upa.granted_at, upa.granted_by "
+            "FROM user_project_access upa JOIN users u ON u.id = upa.user_id "
+            "WHERE upa.project_id=? ORDER BY upa.granted_at DESC",
+            (project_id,),
+        )
+        return [dict(r) for r in rows]
     finally:
         await conn.close()
 

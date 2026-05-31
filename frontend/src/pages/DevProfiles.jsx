@@ -32,7 +32,8 @@ function Avatar({ url, fallback }) {
 
 function ProfileCard({ profile, rank }) {
   const medal = MEDAL_BY_RANK[rank] || `#${rank}`;
-  const displayName = profile.github_login || profile.email.split('@')[0];
+  const displayName =
+    profile.display_name || profile.github_login || profile.email.split('@')[0];
   const sub = profile.github_name || profile.email;
 
   return (
