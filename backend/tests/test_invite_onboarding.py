@@ -312,6 +312,53 @@ async def test_register_rolls_back_when_display_name_stamp_fails(app_client):
 
 
 @pytest.mark.asyncio
+async def test_register_rollback_tolerates_a_failing_cleanup_step(app_client):
+    """Fault-tolerant rollback: if a cleanup step (release_invite_token) itself
+    throws, register must still (a) return the clean 500 — the cleanup exception
+    must not mask it — and (b) still ATTEMPT the user delete. The orphan is NOT
+    guaranteed gone when release fails (the FK then blocks the delete); the point
+    is the endpoint degrades gracefully instead of crashing on the masking error.
+    Under the pre-fix code, release's RuntimeError propagated unhandled and the
+    user delete was skipped entirely."""
+    client, _, _ = app_client
+    import auth as _auth
+    import provisioning as _prov
+    import app as _app_mod
+
+    admin_tok = await _token(client, "admin@x.local", role="admin")
+    invite = _mint_invite(client, admin_tok, "Gail Toss", "gail")
+
+    async def boom_provision(*a, **k):
+        raise RuntimeError("disk full")
+
+    async def boom_release(*a, **k):
+        raise RuntimeError("db locked during rollback")
+
+    delete_calls = {"n": 0}
+
+    async def spy_delete(user_id):
+        delete_calls["n"] += 1  # record the attempt; no-op so the FK can't interfere
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(_prov, "provision_personal_project", boom_provision)
+    monkey.setattr(_auth, "release_invite_token", boom_release)
+    monkey.setattr(_app_mod, "_delete_user", spy_delete)
+    try:
+        res = client.post(
+            "/api/auth/register",
+            json={"email": "gail@x.local", "password": "Test1234!", "invite_token": invite},
+        )
+        # Clean 500 carrying our detail — proves the release exception was caught,
+        # not re-raised as a masking unhandled 500.
+        assert res.status_code == 500, res.text
+        assert res.json()["detail"] == "Registration failed — please try again"
+        # The user delete was still attempted even though release threw first.
+        assert delete_calls["n"] == 1
+    finally:
+        monkey.undo()
+
+
+@pytest.mark.asyncio
 async def test_register_invalid_token_creates_no_orphan(app_client):
     client, _, _ = app_client
     import auth as _auth

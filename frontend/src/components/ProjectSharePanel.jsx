@@ -43,10 +43,16 @@ export default function ProjectSharePanel({ projectId, project }) {
       const s = await listProjectShares(projectId);
       setAllowed(true);
       setShares(s);
-    } catch {
+    } catch (e) {
       // 403 → caller isn't the owner or an admin: hide the whole panel quietly.
-      setAllowed(false);
-      return;
+      if (e?.status === 403) {
+        setAllowed(false);
+        return;
+      }
+      // Transient (500 / network): don't silently hide sharing — show the panel
+      // with an error so the owner knows it failed to load, not that they lack access.
+      setAllowed(true);
+      setError(`Couldn't load sharing settings — ${e?.message || 'please retry'}`);
     }
     try {
       const [profiles, projs, lanes] = await Promise.all([

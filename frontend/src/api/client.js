@@ -1,5 +1,13 @@
 const API = (import.meta.env.VITE_API_URL || '') + '/api';
 
+// Errors carry the HTTP status so callers can branch on it (e.g. hide a panel on
+// 403 but show a banner on 500/network). Message stays the server `detail`.
+function httpError(message, status) {
+  const e = new Error(message);
+  e.status = status;
+  return e;
+}
+
 async function request(path, options = {}) {
   const token = localStorage.getItem('devfleet_token');
   const res = await fetch(`${API}${path}`, {
@@ -18,14 +26,14 @@ async function request(path, options = {}) {
     if (!isAuthEndpoint && token) {
       localStorage.removeItem('devfleet_token');
       window.dispatchEvent(new CustomEvent('devfleet:logout'));
-      throw new Error('Session expired — please log in again');
+      throw httpError('Session expired — please log in again', 401);
     }
     const err = await res.json().catch(() => ({ detail: 'Unauthorized' }));
-    throw new Error(err.detail || 'Unauthorized');
+    throw httpError(err.detail || 'Unauthorized', 401);
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || `Request failed: ${res.status}`);
+    throw httpError(err.detail || `Request failed: ${res.status}`, res.status);
   }
   if (res.status === 204) return null;
   return res.json();

@@ -541,8 +541,19 @@ async def auth_register(request: Request, body: UserCreate):
         # so deleting the user while the token still references them violates the
         # constraint and aborts the whole rollback. Release the token FIRST to drop
         # that reference, then the user delete succeeds.
-        await release_invite_token(body.invite_token)
-        await _delete_user(user["id"])
+        #
+        # Each step is best-effort: a failure in one must not skip the other, and
+        # neither should mask the original provisioning error (the 500 below).
+        # NOTE: if release itself fails, the user delete still hits the FK and the
+        # row can orphan — best-effort, not a guarantee. Logged for follow-up.
+        try:
+            await release_invite_token(body.invite_token)
+        except Exception:
+            log.exception("Rollback: failed to release invite token for %s", body.email)
+        try:
+            await _delete_user(user["id"])
+        except Exception:
+            log.exception("Rollback: failed to delete user %s", user["id"])
         raise HTTPException(500, "Registration failed — please try again")
 
     token = create_access_token(user["id"], user["email"], user["role"])

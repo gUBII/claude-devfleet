@@ -147,7 +147,10 @@ async def provision_personal_project(
     created_dir = False
     inserted = False
     try:
-        os.makedirs(path)  # exist_ok=False — collision already ruled out
+        # exist_ok=False: _unique_project_path picked a free slug, but a concurrent
+        # same-slug register can still win the race here — that surfaces as a
+        # retryable 500, never corruption.
+        os.makedirs(path)
         created_dir = True
 
         await _git_init_main(path, name)
