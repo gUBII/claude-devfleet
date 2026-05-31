@@ -38,6 +38,22 @@ async def is_git_repo(path: str) -> bool:
     return code == 0
 
 
+async def _resolve(ref: str, cwd: str) -> str | None:
+    """Resolve a ref to a commit SHA, or None if it doesn't exist."""
+    code, out, _ = await _run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd
+    )
+    return out if code == 0 else None
+
+
+async def _is_ancestor(ancestor: str, descendant: str, cwd: str) -> bool:
+    """True if `ancestor` is an ancestor of (== or behind) `descendant`."""
+    code, _, _ = await _run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant], cwd
+    )
+    return code == 0
+
+
 async def create_worktree(
     project_path: str,
     session_id: str,
@@ -73,32 +89,53 @@ async def create_worktree(
     # personal folder) has no `origin`, so this just fails quietly.
     await _run(["git", "fetch", "origin", "main"], project_path)
 
-    # Pick the base ref with graceful fallback: origin/main (synced remote) →
-    # local main → HEAD. A personal folder created by provisioning.py has only a
-    # local `main`, so hard-requiring origin/main would fail every dispatch.
-    base_ref = None
-    for candidate in ("origin/main", "main", "HEAD"):
-        code, _, _ = await _run(
-            ["git", "rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}"],
-            project_path,
-        )
-        if code == 0:
-            base_ref = candidate
-            break
-    if base_ref is None:
+    # Choose the base, enforcing the hard invariant: a new worktree must NEVER be
+    # based on a commit BEHIND local `main`. cleanup_worktree merges completed agent
+    # work into local `main` and the system never pushes, so `origin/main` lags —
+    # blindly basing off origin/main (the old behaviour) silently dropped prior
+    # agents' merged work (the base-race). We may still jump FORWARD to origin/main
+    # when the remote is genuinely ahead. See .claude/PRPs/plans/base-race-fix.plan.md.
+    main_sha = await _resolve("main", project_path)
+    origin_sha = await _resolve("origin/main", project_path)
+
+    if main_sha and origin_sha:
+        if await _is_ancestor("main", "origin/main", project_path):
+            base_ref, why = "origin/main", "remote ahead/equal"
+        elif await _is_ancestor("origin/main", "main", project_path):
+            base_ref, why = "main", "local ahead — origin/main lagged"
+        else:
+            base_ref, why = "main", "origin/main DIVERGED from local main"
+            log.warning(
+                "origin/main has diverged from local main in %s — basing on local "
+                "main to preserve merged work; reconcile origin manually", project_path
+            )
+    elif main_sha:
+        base_ref, why = "main", "no origin/main (local-only project)"
+    elif origin_sha:
+        base_ref, why = "origin/main", "no local main"
+    else:
+        base_ref, why = "HEAD", "no main/origin-main"
+
+    # Pin the chosen ref to a SHA NOW, so a concurrent fetch (another dispatch, or
+    # scheduler.py's periodic fetch) can't move it between this decision and the
+    # `worktree add` below — that window is the near-simultaneous-dispatch race.
+    base_sha = await _resolve(base_ref, project_path)
+    if base_sha is None:
         log.error("No usable base ref (origin/main|main|HEAD) in %s", project_path)
         return None, None
 
-    # Branch from the resolved baseline so agent work is grounded in current state
+    # Branch from the pinned baseline so agent work is grounded in current state.
     code, out, err = await _run(
-        ["git", "worktree", "add", "-b", branch_name, worktree_path, base_ref],
+        ["git", "worktree", "add", "-b", branch_name, worktree_path, base_sha],
         project_path,
     )
     if code != 0:
         log.error("Failed to create worktree: %s", err)
         return None, None
-    if base_ref != "origin/main":
-        log.info("Worktree based on %s (origin/main unavailable) in %s", base_ref, project_path)
+    log.info(
+        "Worktree base for session %s: %s [%s] — %s",
+        short_id, base_ref, base_sha[:8], why,
+    )
 
     log.info("Created worktree at %s on branch %s", worktree_path, branch_name)
 
